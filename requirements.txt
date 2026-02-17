@@ -17,3 +17,4 @@ tensorflow
 orbax-checkpoint
 flashbax
 stockfish
+pygame

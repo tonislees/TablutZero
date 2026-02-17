@@ -1,5 +1,3 @@
-from abc import ABC
-
 import jax
 import jax.numpy as jnp
 
@@ -35,7 +33,7 @@ class Hnefatafl(core.Env):
         x = GameState()
         _player_order = jnp.array([[-1, 1], [1, -1]])[jax.random.bernoulli(key).astype(jnp.int32)]
         state = State(  # type: ignore
-            current_player=_player_order[(x.player + 1) // 2],
+            current_player=_player_order[(x.color + 1) // 2],
             _player_order=_player_order,
             _x=x,
         )
@@ -58,3 +56,15 @@ class Hnefatafl(core.Env):
         assert isinstance(state, State)
         x = jax.lax.cond(state.current_player == player_id, lambda: state._x, lambda: _flip(state._x))
         return self.game.observe(x)
+
+    @property
+    def id(self):
+        return "hnefatafl"
+
+    @property
+    def version(self) -> str:
+        return "v0"
+
+    @property
+    def num_players(self) -> int:
+        return 2

@@ -1,7 +1,9 @@
 
-data/*
-models/checkpoints/*
-plots/*
+data/
+models/
+BayesElo/
+bayeselo
+game_results.pgn
 .idea/
 
 # Byte-compiled / optimized / DLL files

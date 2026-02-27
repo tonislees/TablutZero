@@ -31,7 +31,7 @@ def run_mcts(model: nnx.Module, env_state, rng_key: jax.Array, num_simulations: 
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
-    graphdef, state = nnx.split(model)
+    graph_def, state = nnx.split(model)
     root_logits, root_value = model(env_state.observation, train=False)
 
     root = mctx.RootFnOutput(

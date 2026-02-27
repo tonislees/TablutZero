@@ -1,4 +1,3 @@
-import datetime
 from functools import partial
 from pathlib import Path
 
@@ -8,13 +7,14 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
-from matplotlib import pyplot as plt
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 
+from src.evaluation import Evaluator
 from src.hnefatafl.hnefatafl import Hnefatafl
 from src.mcts import run_mcts
+from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
 
 
@@ -64,33 +64,55 @@ def self_play_step(model, env_state, buffer_state, rng_key, num_simulations, env
     return next_env_state, new_buffer_state
 
 
+def dir_safe(dir_name: str, parent_dir: Path) -> Path:
+    """
+    Creates the specified directory if it doesn't already exist.
+    Returns the directory path.
+    """
+    dir_ = parent_dir / dir_name
+    dir_.mkdir(parents=True, exist_ok=True)
+    return dir_
+
 class Coach:
     def __init__(self, cfg: DictConfig):
+        print('Initializing coach...')
+        self.cfg = cfg
+        self.rngs: nnx.Rngs = nnx.Rngs(cfg.train.seed)
+        self.checkpointer = ocp.StandardCheckpointer()
+
         # Directories
         root_dir = self.root = Path(__file__).resolve().parents[1]
-        self.model_dir = root_dir / 'models'
-        self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoints_dir = self.model_dir / 'checkpoints'
-        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        self.plot_dir = root_dir / 'plots'
-        self.plot_dir.mkdir(parents=True, exist_ok=True)
+        model_dir = dir_safe('models', root_dir)
+        metrics_dir = dir_safe('data', root_dir)
+        self.dirs = {
+            'checkpoints': dir_safe('checkpoints', model_dir),
+            'eval_pool': dir_safe('eval_pool', model_dir),
+            'plots': dir_safe('plots', metrics_dir),
+            'metrics': dir_safe('metrics', metrics_dir),
+            'bayeselo': root_dir / 'bayeselo',
+            'pgn': root_dir / 'game_results.pgn'
+        }
+        if not cfg.train.load_checkpoint:
+            self.dirs['pgn'].unlink(missing_ok=True)
+
+        # Model & optimizer
+        self.model: nnx.Module = self._load_model(self.dirs['checkpoints'], cfg.train.load_checkpoint)
+        self.eval_model = None
+        self.optimizer: nnx.Optimizer = nnx.Optimizer(
+            self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
+        )
+
+        # Environment
+        self.env = Hnefatafl()
+        key_env = jax.random.PRNGKey(cfg.train.seed + 1)
+        self.env_state = jax.jit(jax.vmap(self.env.init))(
+            jax.random.split(key_env, cfg.train.batch_size)
+        )
 
         # Setup
-        self.cfg = cfg
-        self.seed = cfg.train.seed
-        self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
-        self.checkpointer = ocp.StandardCheckpointer()
-        self.num_epochs = cfg.train.num_epochs
-        self.num_simulations = cfg.mcts.simulations
-        self.metrics_history = {
-            'train_loss': [],
-            'train_policy_loss': [],
-            'train_value_loss': [],
-        }
-        self.metrics: nnx.MultiMetric = nnx.MultiMetric(
-            accuracy=nnx.metrics.Accuracy(),
-            loss=nnx.metrics.Average(argname='loss'),
-        )
+        self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
+        self.metrics_tracker = MetricsTracker(cfg, self.dirs)
+        self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
 
         # Buffer
         self.buffer = fbx.make_flat_buffer(
@@ -106,34 +128,44 @@ class Coach:
         }
         self.buffer_state = self.buffer.init(example_transition)
 
-        # Environment
-        self.train_env = Hnefatafl()
-        key_env = jax.random.PRNGKey(self.seed + 1)
-        self.env_state = jax.jit(jax.vmap(self.train_env.init))(
-            jax.random.split(key_env, cfg.train.batch_size)
-        )
+    def _get_last_iteration(self):
+        """
+        Finds the last iteration number from eval pool directories.
+        Returns last iteration.
+        """
+        dirs = [d.name for d in self.dirs['eval_pool'].iterdir() if d.is_dir()]
+        dirs = list(map(lambda x: int(x.split('_')[1]), dirs))
+        dirs.sort()
+        print(dirs)
+        return dirs[-1]
 
-        # Model & optimizer
-        self.model: nnx.Module = HnefataflZeroNet(depth=cfg.model.depth, filter_count=cfg.model.filter_count,
-                                              rngs=self.rngs)
-        self.optimizer: nnx.Optimizer = nnx.Optimizer(
-            self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
-        )
-        if self.checkpoints_dir.exists() and any(self.checkpoints_dir.iterdir()):
-            graphdef, abstract_state = nnx.split(self.model)
-            restored_state = self.checkpointer.restore(self.checkpoints_dir, abstract_state)
-            self.model = nnx.merge(graphdef, restored_state)
-            print(f"Restored model from {self.checkpoints_dir}")
+    def _load_model(self, model_dir: Path, load_checkpoint: bool) -> HnefataflZeroNet:
+        """
+        Loads previous checkpoint if load_old or a new instance if not.
 
-    def learn_rl(self):
-        print("Starting RL Loop...")
+        Returns the loaded model.
+        """
+        model = HnefataflZeroNet(depth=self.cfg.model.depth, filter_count=self.cfg.model.filter_count,
+                                 rngs=self.rngs)
+        if load_checkpoint and model_dir.exists() and any(model_dir.iterdir()):
+            graph_def, abstract_state = nnx.split(model)
+            restored_state = self.checkpointer.restore(model_dir, abstract_state)
+            model = nnx.merge(graph_def, restored_state)
 
-        for iteration in range(self.cfg.train.iterations):
+        return model
+
+    def train(self):
+        for i in range(self.cfg.train.iterations):
+            iteration = i + self.last_iteration + 1
             print(f"--- Iteration {iteration} ---")
+
             self._run_self_play_loop()
             self._run_training_loop()
-            self.save_model()
-        self._plot_metrics_rl()
+
+            elo = self.evaluator.evaluate_model(iteration)
+            self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
+        self._save_progress()
+        self.metrics_tracker.plot_metrics()
 
     def _run_self_play_loop(self):
         self.model.eval()
@@ -150,7 +182,7 @@ class Coach:
                 self.buffer_state,
                 rng_key,
                 self.cfg.mcts.simulations,
-                self.train_env,
+                self.env,
                 self.buffer
             )
 
@@ -171,9 +203,7 @@ class Coach:
                 training_data
             )
 
-            self.metrics_history['train_loss'].append(loss.item())
-            self.metrics_history['train_policy_loss'].append(p_loss.item())
-            self.metrics_history['train_value_loss'].append(v_loss.item())
+            self.metrics_tracker.update_step(total_loss=loss, policy_loss=p_loss, value_loss=v_loss)
 
             pbar.set_postfix({
                 'L': f"{loss:.4f}",
@@ -181,59 +211,20 @@ class Coach:
                 'V': f"{v_loss:.4f}"
             })
 
-    def _plot_metrics_rl(self):
-        def smooth(scalars, weight=0.9):
-            if not scalars: return []
-            last = scalars[0]
-            smoothed = []
-            for point in scalars:
-                smoothed_val = last * weight + (1 - weight) * point
-                smoothed.append(smoothed_val)
-                last = smoothed_val
-            return smoothed
+        self.metrics_tracker.compute_and_record()
 
-        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-
-        metrics = [
-            ('Total Loss', self.metrics_history['train_loss']),
-            ('Policy Loss (Cross Entropy)', self.metrics_history['train_policy_loss']),
-            ('Value Loss (MSE)', self.metrics_history['train_value_loss'])
-        ]
-
-        for ax, (title, data) in zip(axes, metrics):
-            if not data: continue
-
-            ax.plot(data, alpha=0.25, color='gray', label='Raw')
-            smoothed_data = smooth(data, weight=0.95)
-            ax.plot(smoothed_data, alpha=1.0, linewidth=2, label='Smoothed')
-
-            ax.set_title(title)
-            ax.set_xlabel('Training Steps')
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-
-            iterations = len(data) // self.cfg.train.num_epochs
-            for i in range(iterations):
-                ax.axvline(x=i * self.cfg.train.num_epochs, color='red', alpha=0.1)
-
-        plt.tight_layout()
-
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        plot_path = self.plot_dir / f"RL_Training_Metrics_{timestamp}.png"
-        plt.savefig(plot_path)
-        plt.close(fig)
-        print(f"Saved training plot to {plot_path}")
-
-
-    def save_model(self):
+    def _save_progress(self):
+        """Saves the model parameters, loss data, and evaluation data."""
         _, state = nnx.split(self.model)
-        self.checkpointer.save(self.checkpoints_dir, state, force=True)
-        print(f"Checkpoint saved to {self.checkpoints_dir}")
+        self.checkpointer.save(self.dirs['checkpoints'], state, force=True)
+
+        self.metrics_tracker.save_metrics()
+
 
 @hydra.main(version_base=None, config_path='..', config_name='config')
 def main(cfg: DictConfig):
     coach = Coach(cfg)
-    coach.learn_rl()
+    coach.train()
 
 
 if __name__ == '__main__':

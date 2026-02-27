@@ -8,13 +8,8 @@ chex
 chess
 numpy
 omegaconf
-etils
 tqdm
-grain
-tensorflow-datasets
 matplotlib
-tensorflow
 orbax-checkpoint
 flashbax
-stockfish
 pygame

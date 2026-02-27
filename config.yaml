@@ -12,15 +12,9 @@ hydra:
   hydra_logging:
     level: ERROR
 
-preprocessing:
-  states_per_file: 500
-  min_half_moves: 40
-  min_elo: 2400
-  game_count: 20
-
 model:
   depth: 7
-  filter_count: 256
+  filter_count: 128
 
 mcts:
   simulations: 2
@@ -31,14 +25,14 @@ buffer:
 
 train:
   num_epochs: 15
-  batch_size: 4
+  batch_size: 2
   seed: 42
   worker_count: 10
-  num_records: 1000
   learning_rate: 0.001
-  drop_remainder: False
   self_play_steps: 200
-  iterations: 10
+  iterations: 2
+  max_eval_pool: 10
+  load_checkpoint: False
 
 interface:
   start_player: white

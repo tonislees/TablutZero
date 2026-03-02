@@ -1,9 +1,12 @@
+import time
 from functools import partial
 from pathlib import Path
 
 import flashbax as fbx
 import hydra
 import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.experimental import mesh_utils
 import jax.numpy as jnp
 import optax
 from flax import nnx
@@ -114,6 +117,12 @@ class Coach:
         self.rngs: nnx.Rngs = nnx.Rngs(cfg.train.seed)
         self.checkpointer = ocp.StandardCheckpointer()
 
+        # Multiple devices
+        self.devices = mesh_utils.create_device_mesh((len(jax.devices()),))
+        self.mesh = Mesh(self.devices, axis_names=('batch',))
+        self.data_sharding = NamedSharding(self.mesh, PartitionSpec('batch'))
+        self.replicated_sharding = NamedSharding(self.mesh, PartitionSpec())
+
         # Directories
         root_dir = self.root = Path(__file__).resolve().parents[1]
         model_dir = dir_safe('models', root_dir)
@@ -132,6 +141,9 @@ class Coach:
         # Model & optimizer
         self.model: nnx.Module = self._load_model(self.dirs['checkpoints'], cfg.train.load_checkpoint)
         self.eval_model = None
+        graph_def, state = nnx.split(self.model)
+        state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
+        self.model = nnx.merge(graph_def, state)
         self.optimizer: nnx.Optimizer = nnx.Optimizer(
             self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
         )
@@ -141,6 +153,9 @@ class Coach:
         key_env = jax.random.PRNGKey(cfg.train.seed + 1)
         self.env_state = jax.jit(jax.vmap(self.env.init))(
             jax.random.split(key_env, cfg.train.batch_size)
+        )
+        self.env_state = jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, self.data_sharding), self.env_state
         )
 
         # Setup
@@ -191,6 +206,7 @@ class Coach:
 
     def train(self):
         for i in range(self.cfg.train.iterations):
+            start_time = time.time()
             iteration = i + self.last_iteration + 1
             print(f"--- Iteration {iteration} ---")
 
@@ -201,6 +217,16 @@ class Coach:
 
             elo = self.evaluator.evaluate_model(iteration)
             self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
+
+            t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
+            p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]
+            v_loss = self.metrics_tracker.metrics_history['value_loss'][-1]
+
+            print(f">>> RESULTS | Elo: {elo} | Total Loss: {t_loss:.4f} (Policy: {p_loss:.4f}, Value: {v_loss:.4f})",
+                  flush=True)
+            elapsed = time.time() - start_time
+            print(f">>> TIME    | Iteration {iteration} took {elapsed / 60:.2f} minutes.\n", flush=True)
+
         self._save_progress()
         self.metrics_tracker.plot_metrics()
 
@@ -228,12 +254,15 @@ class Coach:
         self.model.train()
 
         steps = self.cfg.train.num_epochs
-        pbar = tqdm(range(steps), desc="Training")
+        pbar = tqdm(range(steps), desc="Training", mininterval=self.cfg.train.tqdm_interval, ncols=100)
 
         for _ in pbar:
             rng_key = self.rngs.split()
             batch = self.buffer.sample(self.buffer_state, rng_key)
             training_data = batch.experience.first
+            training_data = jax.tree_util.tree_map(
+                lambda x: jax.device_put(x, self.data_sharding), training_data
+            )
 
             loss, p_loss, v_loss = train_step(
                 self.model,

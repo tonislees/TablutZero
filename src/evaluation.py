@@ -74,7 +74,7 @@ class Evaluator:
 
         num_simulations = self.cfg.mcts.simulations
 
-        pbar = tqdm(total=512, desc=f"Arena: Iter_{iteration} vs {opponent}")
+        pbar = tqdm(total=512, desc=f"Arena: Iter_{iteration} vs {opponent}", mininterval=self.cfg.train.tqdm_interval, ncols=100)
 
         while not jnp.all(env_state.terminated):
             rng_key = self.rngs.split()

@@ -507,7 +507,7 @@ def _check_edge_fort(state: GameState):
         defender_mask = (state.board == -TAFLMAN)
         attacker_mask = (state.board == TAFLMAN)
 
-        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=empty_mask, iterations=60)
+        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=empty_mask, iterations=35)
 
         # Identify the wall
         flood_grid = flood.reshape(BOARD_EDGE, BOARD_EDGE)
@@ -551,7 +551,7 @@ def _check_encirclement(state: GameState):
         king_pos_mask = (state.board > 0)
         defenders_mask = (state.board >= 0)
 
-        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=defenders_mask, iterations=60)
+        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=defenders_mask, iterations=35)
 
         # Check if the flood touched the edge
         escaped = (flood & EDGES).any()

@@ -21,10 +21,27 @@ def _arena_step(model_A, model_B, state, key, num_simulations, env):
     """Executes one batched turn in the arena where two distinct models play each other."""
     key_A, key_B = jax.random.split(key)
 
-    out_A = run_mcts(model_A, state, key_A, num_simulations, env)
-    out_B = run_mcts(model_B, state, key_B, num_simulations, env)
+    is_p0 = (state.current_player == 0)
+    is_p1 = (state.current_player == 1)
 
-    action = jnp.where(state.current_player == 0, out_A.action, out_B.action)
+    any_p0 = jnp.any(is_p0 & ~state.terminated)
+    any_p1 = jnp.any(is_p1 & ~state.terminated)
+
+    out_A_action = jax.lax.cond(
+        any_p0,
+        lambda _: run_mcts(model_A, state, key_A, num_simulations, env).action,
+        lambda _: jnp.zeros((state.current_player.shape[0],), dtype=jnp.int32),
+        operand=None
+    )
+
+    out_B_action = jax.lax.cond(
+        any_p1,
+        lambda _: run_mcts(model_B, state, key_B, num_simulations, env).action,
+        lambda _: jnp.zeros((state.current_player.shape[0],), dtype=jnp.int32),
+        operand=None
+    )
+
+    action = jnp.where(is_p0, out_A_action, out_B_action)
 
     next_state = jax.vmap(env.step)(state, action)
     return next_state
@@ -58,8 +75,11 @@ class Evaluator:
             current_player=player_order[:, 0]
         )
 
-    def evaluate_model(self, iteration: int) -> int:
+    def evaluate_model(self, iteration: int, model_state) -> int:
         """Evaluates the main model against a random past checkpoint model with BayesElo."""
+        graph_def, _ = nnx.split(self.model)
+        self.model = nnx.merge(graph_def, jax.device_put(model_state))
+
         env_state = self.base_state
 
         opponent = self._load_random_opponent()
@@ -74,15 +94,10 @@ class Evaluator:
 
         num_simulations = self.cfg.mcts.simulations
 
-        pbar = tqdm(total=512, desc=f"Arena: Iter_{iteration} vs {opponent}", mininterval=self.cfg.train.tqdm_interval, ncols=100)
-
         while not jnp.all(env_state.terminated):
             rng_key = self.rngs.split()
             env_state = _arena_step(self.model, self.eval_model, env_state, rng_key, num_simulations, self.env)
-            pbar.update(1)
-            if env_state.terminated.all():
-                break
-        pbar.close()
+
 
         # Collect results
         rewards = jax.device_get(env_state.rewards)

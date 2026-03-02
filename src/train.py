@@ -1,3 +1,4 @@
+import threading
 import time
 from functools import partial
 from pathlib import Path
@@ -165,6 +166,7 @@ class Coach:
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.metrics_tracker = MetricsTracker(cfg, self.dirs)
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
+        self.eval_thread = None
 
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
@@ -211,6 +213,7 @@ class Coach:
         return model
 
     def train(self):
+        eval_interval = self.cfg.train.eval_interval
         for i in range(self.cfg.train.iterations):
             start_time = time.time()
             iteration = i + self.last_iteration + 1
@@ -221,20 +224,38 @@ class Coach:
 
             self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
 
-            elo = self.evaluator.evaluate_model(iteration)
-            self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
+            if iteration % eval_interval == 0:
+                if self.eval_thread and self.eval_thread.is_alive():
+                    print("Waiting for previous evaluation thread to finish...")
+                    self.eval_thread.join()
+
+                _, current_state = nnx.split(self.model)
+                eval_state_snapshot = jax.device_get(current_state)
+
+                self.eval_thread = threading.Thread(
+                    target=self._run_async_evaluation,
+                    args=(iteration, eval_state_snapshot)
+                )
+                self.eval_thread.start()
 
             t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
             p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]
             v_loss = self.metrics_tracker.metrics_history['value_loss'][-1]
 
-            print(f">>> RESULTS | Elo: {elo} | Total Loss: {t_loss:.4f} (Policy: {p_loss:.4f}, Value: {v_loss:.4f})",
+            print(f">>> RESULTS | Total Loss: {t_loss:.4f} (Policy: {p_loss:.4f}, Value: {v_loss:.4f})",
                   flush=True)
             elapsed = time.time() - start_time
             print(f">>> TIME    | Iteration {iteration} took {elapsed / 60:.2f} minutes.\n", flush=True)
 
         self._save_progress()
         self.metrics_tracker.plot_metrics()
+
+    def _run_async_evaluation(self, iteration, model_state):
+        """Wrapper to run evaluation in a background thread and update metrics."""
+        elo = self.evaluator.evaluate_model(iteration, model_state)
+
+        self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
+        print(f"\n>>> ASYNC EVAL RESULT | Iteration {iteration} | Elo: {elo}\n")
 
     def _run_self_play_loop(self):
         self.model.eval()

@@ -30,6 +30,7 @@ train:
   tqdm_interval: 5.0
   learning_rate: 0.001
   load_checkpoint: False
+  eval_interval: 5
 
 interface:
   start_player: white

@@ -177,6 +177,9 @@ class Coach:
             "value_target": jnp.zeros((), dtype=jnp.float32)
         }
         self.buffer_state = self.buffer.init(example_transition)
+        self.buffer_state = jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, self.data_sharding), self.buffer_state
+        )
 
     def _get_last_iteration(self):
         """

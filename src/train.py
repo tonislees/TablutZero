@@ -33,6 +33,14 @@ def loss_fn(model, batch, train=True):
     return total_loss, (policy_loss, value_loss)
 
 
+@partial(jax.jit, backend='cpu', static_argnames=('buffer',))
+def add_to_buffer_cpu(buffer_state, transitions, buffer):
+    def add_step(buf_state, transition_batch):
+        return buffer.add(buf_state, transition_batch), None
+    new_buffer_state, _ = jax.lax.scan(add_step, buffer_state, transitions)
+    return new_buffer_state
+
+
 @nnx.jit
 def train_step(model, optimizer, batch):
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
@@ -41,8 +49,8 @@ def train_step(model, optimizer, batch):
     return loss, p_loss, v_loss
 
 
-@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env', 'buffer'))
-def self_play(model, env_state, buffer_state, rng_key, num_steps, num_simulations, env, buffer, batch_size):
+@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env'))
+def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size):
     graph_def, model_state = nnx.split(model)
 
     def step_fn(state, key):
@@ -93,12 +101,7 @@ def self_play(model, env_state, buffer_state, rng_key, num_steps, num_simulation
 
     _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
 
-    def add_to_buffer(buf_state, transition_batch):
-        return buffer.add(buf_state, transition_batch), None
-
-    new_buffer_state, _ = jax.lax.scan(add_to_buffer, buffer_state, final_transitions)
-
-    return final_env_state, new_buffer_state
+    return final_env_state, final_transitions
 
 
 def dir_safe(dir_name: str, parent_dir: Path) -> Path:
@@ -178,7 +181,7 @@ class Coach:
         }
         self.buffer_state = self.buffer.init(example_transition)
         self.buffer_state = jax.tree_util.tree_map(
-            lambda x: jax.device_put(x, self.data_sharding), self.buffer_state
+            lambda x: jax.device_put(x, jax.devices('cpu')[0]), self.buffer_state
         )
 
     def _get_last_iteration(self):
@@ -241,17 +244,17 @@ class Coach:
 
         rng_key = self.rngs.split()
 
-        self.env_state, self.buffer_state = self_play(
+        self.env_state, final_transitions = self_play(
             model=self.model,
             env_state=self.env_state,
-            buffer_state=self.buffer_state,
             rng_key=rng_key,
             num_steps = self.cfg.train.self_play_steps,
             num_simulations=self.cfg.mcts.simulations,
             env=self.env,
-            buffer=self.buffer,
             batch_size=self.cfg.train.batch_size
         )
+
+        self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions, self.buffer)
 
     def _run_training_loop(self):
         self.model.train()

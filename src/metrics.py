@@ -18,6 +18,17 @@ class MetricsTracker:
             value_loss=nnx.metrics.Average(argname='value_loss'),
         )
 
+    def update_frames(self, frame_count: int) -> None:
+        """
+        Calculates the cumulative frame count and appends it to the history.
+        """
+        if not self.metrics_history['frames']:
+            current_total = 0
+        else:
+            current_total = self.metrics_history['frames'][-1]
+
+        self.metrics_history['frames'].append(current_total + frame_count)
+
     def update_step(self, total_loss: float, policy_loss: float, value_loss: float) -> None:
         """
         Feeds the current batch's outputs into the MultiMetric.
@@ -51,29 +62,33 @@ class MetricsTracker:
                 last = smoothed_val
             return smoothed
 
-        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+        axes = axes.flatten()
 
         metrics = [
             ('Total Loss', self.metrics_history['total_loss']),
             ('Policy Loss (Cross Entropy)', self.metrics_history['policy_loss']),
-            ('Value Loss (MSE)', self.metrics_history['value_loss'])
+            ('Value Loss (MSE)', self.metrics_history['value_loss']),
+            ('Elo Rating', self.metrics_history['elo_evaluation'])
         ]
 
-        for ax, (title, data) in zip(axes, metrics):
-            if not data: continue
+        frames = self.metrics_history['frames']
 
-            ax.plot(data, alpha=0.25, color='gray', label='Raw')
-            smoothed_data = smooth(data, weight=0.95)
-            ax.plot(smoothed_data, alpha=1.0, linewidth=2, label='Smoothed')
+        for ax, (title, data) in zip(axes, metrics):
+            if not data or len(data) != len(frames):
+                continue
+
+            ax.plot(frames, data, alpha=0.25, color='gray', label='Raw')
+
+            if len(data) > 2:
+                w = 0.95 if 'Loss' in title else 0.5
+                smoothed_data = smooth(data, weight=w)
+                ax.plot(frames, smoothed_data, alpha=1.0, linewidth=2, label='Smoothed')
 
             ax.set_title(title)
-            ax.set_xlabel('Training Steps')
+            ax.set_xlabel('Total Frames')
             ax.grid(True, alpha=0.3)
             ax.legend()
-
-            iterations = len(data) // self.cfg.train.num_epochs
-            for i in range(iterations):
-                ax.axvline(x=i * self.cfg.train.num_epochs, color='red', alpha=0.1)
 
         plt.tight_layout()
 

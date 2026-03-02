@@ -38,42 +38,64 @@ def train_step(model, optimizer, batch):
     return loss, p_loss, v_loss
 
 
-@partial(nnx.jit, static_argnames=('num_simulations', 'env', 'buffer'))
-def self_play_step(model, env_state, buffer_state, rng_key, num_simulations, env, buffer):
-    key_reset, key_search, key_act = jax.random.split(rng_key, 3)
+@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env', 'buffer'))
+def self_play(model, env_state, buffer_state, rng_key, num_steps, num_simulations, env, buffer, batch_size):
+    graph_def, model_state = nnx.split(model)
 
-    mcts_output = run_mcts(model, env_state, key_search, num_simulations, env)
-    actions = mcts_output.action
-    mcts_values = mcts_output.search_tree.node_values[:, 0]
-    next_env_state = jax.vmap(env.step)(env_state, actions)
-    batch_indices = jnp.arange(env_state.current_player.shape[0])
-    current_player_rewards = next_env_state.rewards[batch_indices, env_state.current_player]
-    final_value_target = jnp.where(
-        next_env_state.terminated,
-        current_player_rewards,
-        mcts_values
-    )
+    def step_fn(state, key):
+        key_reset, key_search = jax.random.split(key)
+        local_model = nnx.merge(graph_def, model_state)
 
-    transition = {
-        "observation": env_state.observation,
-        "policy_target": mcts_output.action_weights,
-        "value_target": final_value_target
-    }
-    new_buffer_state = buffer.add(buffer_state, transition)
+        mcts_output = run_mcts(local_model, state, key_search, num_simulations, env)
+        actions = mcts_output.action
+        next_env_state = jax.vmap(env.step)(state, actions)
 
-    batch_size = env_state.current_player.shape[0]
+        # Auto reset if some game is terminal
+        reset_keys = jax.random.split(key_reset, batch_size)
+        reset_states = jax.vmap(env.init)(reset_keys)
 
-    reset_keys = jax.random.split(key_reset, batch_size)
-    reset_states = jax.vmap(env.init)(reset_keys)
+        def select_if_terminated(reset_val, next_val):
+            shape = (batch_size,) + (1,) * (next_val.ndim - 1)
+            mask = next_env_state.terminated.reshape(shape)
+            return jnp.where(mask, reset_val, next_val)
 
-    def select_if_terminated(reset_val, next_val):
-        shape = (batch_size,) + (1,) * (next_val.ndim - 1)
-        mask = next_env_state.terminated.reshape(shape)
-        return jnp.where(mask, reset_val, next_val)
+        auto_reset_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
 
-    next_env_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
+        # Save temporary states to an array
+        batch_indices = jnp.arange(batch_size)
+        current_player_rewards = next_env_state.rewards[batch_indices, state.current_player]
 
-    return next_env_state, new_buffer_state
+        transition = {
+            "observation": state.observation,
+            "policy_target": mcts_output.action_weights,
+            "reward": current_player_rewards,
+            "terminated": next_env_state.terminated,
+        }
+        return auto_reset_state, transition
+
+    keys = jax.random.split(rng_key, num_steps)
+    final_env_state, history = jax.lax.scan(step_fn, env_state, keys)
+
+    # If the game doesn't end in a terminal state, bootstrap using the network's prediction
+    _, next_value = model(final_env_state.observation)
+
+    def step_back(next_return, transition):
+        return_ = jnp.where(transition['terminated'], transition['reward'], -next_return)
+        out_transition = {
+            'observation': transition['observation'],
+            'policy_target': transition['policy_target'],
+            'value_target': return_
+        }
+        return return_, out_transition
+
+    _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
+
+    def add_to_buffer(buf_state, transition_batch):
+        return buffer.add(buf_state, transition_batch), None
+
+    new_buffer_state, _ = jax.lax.scan(add_to_buffer, buffer_state, final_transitions)
+
+    return final_env_state, new_buffer_state
 
 
 def dir_safe(dir_name: str, parent_dir: Path) -> Path:
@@ -175,6 +197,8 @@ class Coach:
             self._run_self_play_loop()
             self._run_training_loop()
 
+            self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
+
             elo = self.evaluator.evaluate_model(iteration)
             self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
         self._save_progress()
@@ -186,18 +210,19 @@ class Coach:
         steps = self.cfg.train.self_play_steps
         print(f"Generating data ({steps} steps x {self.cfg.train.batch_size} games)...")
 
-        for _ in tqdm(range(steps)):
-            rng_key = self.rngs.split()
+        rng_key = self.rngs.split()
 
-            self.env_state, self.buffer_state = self_play_step(
-                self.model,
-                self.env_state,
-                self.buffer_state,
-                rng_key,
-                self.cfg.mcts.simulations,
-                self.env,
-                self.buffer
-            )
+        self.env_state, self.buffer_state = self_play(
+            model=self.model,
+            env_state=self.env_state,
+            buffer_state=self.buffer_state,
+            rng_key=rng_key,
+            num_steps = self.cfg.train.self_play_steps,
+            num_simulations=self.cfg.mcts.simulations,
+            env=self.env,
+            buffer=self.buffer,
+            batch_size=self.cfg.train.batch_size
+        )
 
     def _run_training_loop(self):
         self.model.train()

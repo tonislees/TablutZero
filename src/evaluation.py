@@ -182,14 +182,17 @@ class Evaluator:
     def _load_eval_pool(self, load_checkpoint: bool) -> dict[str, HnefataflZeroNet]:
         """Load up to `max_pool_size` models from disk into a CPU dictionary."""
         pool = {}
-        if not self.dirs['eval_pool'].exists() or not load_checkpoint:
+        dir_path = self.dirs['eval_pool']
+        if not load_checkpoint:
+            shutil.rmtree(dir_path)
+            dir_path.mkdir(parents=True, exist_ok=True)
             return pool
 
         _, abstract_state = nnx.split(
             HnefataflZeroNet(depth=self.cfg.model.depth,
                              filter_count=self.cfg.model.filter_count, rngs=self.rngs)
         )
-        dirs = [d for d in self.dirs['eval_pool'].iterdir() if d.is_dir()]
+        dirs = [d for d in dir_path.iterdir() if d.is_dir()]
 
         for ckpt_dir in dirs[-self.cfg.train.max_eval_pool:]:
             restored_state = self.checkpointer.restore(ckpt_dir.resolve())

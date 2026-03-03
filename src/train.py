@@ -171,20 +171,20 @@ class Coach:
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
         self.buffer = fbx.make_flat_buffer(
-            max_length=min_buffer_size * 8,
+            max_length=min_buffer_size * 4,
             min_length=min_buffer_size,
             sample_batch_size=cfg.train.batch_size,
             add_batch_size=cfg.train.batch_size
         )
-        example_transition = {
-            "observation": jnp.zeros((11, 11, 43), dtype=jnp.float32),
-            "policy_target": jnp.zeros((121 * 40,), dtype=jnp.float32),
-            "value_target": jnp.zeros((), dtype=jnp.float32)
-        }
-        self.buffer_state = self.buffer.init(example_transition)
-        self.buffer_state = jax.tree_util.tree_map(
-            lambda x: jax.device_put(x, jax.devices('cpu')[0]), self.buffer_state
-        )
+        cpu_device = jax.devices('cpu')[0]
+        with jax.default_device(cpu_device):
+            example_transition = {
+                "observation": jnp.zeros((11, 11, 43), dtype=jnp.float32),
+                "policy_target": jnp.zeros((121 * 40,), dtype=jnp.float32),
+                "value_target": jnp.zeros((), dtype=jnp.float32)
+            }
+            self.buffer_state = self.buffer.init(example_transition)
+        self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
 
     def _get_last_iteration(self):
         """

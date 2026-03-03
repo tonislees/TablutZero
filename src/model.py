@@ -13,6 +13,7 @@ class ConvBlock(nnx.Module):
         self.bn = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
+        x = x.astype(jnp.bfloat16)
         x = x.reshape((-1, BOARD_EDGE, BOARD_EDGE, OBS_PLANES))
         x = self.conv(x)
         x = self.bn(x, use_running_average=not train)
@@ -31,6 +32,7 @@ class ResBlock(nnx.Module):
         self.bn2 = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
+        x = x.astype(jnp.bfloat16)
         residual = x
 
         x = self.conv1(x)
@@ -50,6 +52,7 @@ class PolicyOutBlock(nnx.Module):
         self.bn = nnx.BatchNorm(num_features=PLANES, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
+        x = x.astype(jnp.bfloat16)
         x = self.conv(x)
         x = self.bn(x, use_running_average=not train)
 
@@ -66,6 +69,7 @@ class ValueOutBlock(nnx.Module):
         self.dense2 = nnx.Linear(in_features=256, out_features=1, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
+        x = x.astype(jnp.bfloat16)
         x = self.conv(x)
         x = self.bn(x, use_running_average=not train)
         x = nnx.relu(x)
@@ -96,6 +100,7 @@ class HnefataflZeroNet(nnx.Module):
         self.value_head = ValueOutBlock(filter_count, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool = False):
+        x = x.astype(jnp.bfloat16)
         x = self.conv_block(x, train=train)
 
         for block in self.res_blocks:

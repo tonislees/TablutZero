@@ -299,9 +299,7 @@ def legal_moves(state: GameState, from_sq: Array) -> Array:
         dest_valid = (to_sq >= 0) & (to_sq < BOARD_SIZE)
 
         between_idxs = BETWEEN[from_sq, to_sq]
-        path_clear = jnp.all(
-            jnp.where(between_idxs != -1, state.board[between_idxs] == EMPTY, True)
-        )
+        path_clear = jnp.all((between_idxs == -1) | (state.board[between_idxs] == EMPTY))
         target_empty = state.board[to_sq] == EMPTY
 
         ok = dest_valid & path_clear & (piece > 0) & target_empty
@@ -355,28 +353,38 @@ class Game:
         return state
 
     @staticmethod
+    def mcts_step(state: GameState, action: Array):
+        state = _apply_move(state, Action.from_label(action))
+        state = _flip(state)
+        state = _update_history(state)
+        state = state._replace(step_count=state.step_count + 1)
+        return state
+
+    @staticmethod
     def observe(state: GameState):
         ones = jnp.ones((1, BOARD_EDGE, BOARD_EDGE), dtype=jnp.float32)
         color = (state.color + 1) // 2
 
-        def make(i):
-            board = jnp.rot90(state.board_history[i].reshape((BOARD_EDGE, BOARD_EDGE)), k=1)
+        history_2d = state.board_history.reshape((8, BOARD_EDGE, BOARD_EDGE))
+        board = jnp.rot90(history_2d, k=1, axes=(1, 2))
 
-            friendly_pieces = (board == (state.color * TAFLMAN)).astype(jnp.float32)
-            enemy_pieces = (board == (-state.color * TAFLMAN)).astype(jnp.float32)
-            king = (jnp.abs(board) == KING).astype(jnp.float32)
+        friendly_pieces = (board == (state.color * TAFLMAN)).astype(jnp.float32)
+        enemy_pieces = (board == (-state.color * TAFLMAN)).astype(jnp.float32)
+        king = (jnp.abs(board) == KING).astype(jnp.float32)
 
-            hash_ = state.hash_history[i, :]
-            rep = (state.hash_history == hash_).all(axis=1).sum() - 1
-            rep = lax.select((hash_ == 0).all(), 0, rep)
-            rep0 = jnp.squeeze(ones * (rep >= 1), axis=0)
-            rep1 = jnp.squeeze(ones * (rep >= 2), axis=0)
+        hash_ = state.hash_history[:8, :]
+        rep = (state.hash_history == hash_[:, None, :]).all(axis=2).sum(axis=1) - 1
+        rep = jnp.where((hash_ == 0).all(axis=1), 0, rep)
 
-            return jnp.vstack([friendly_pieces, enemy_pieces, king, rep0, rep1])
+        rep0 = jnp.broadcast_to((rep >= 1)[:, None, None], (8, BOARD_EDGE, BOARD_EDGE)).astype(jnp.float32)
+        rep1 = jnp.broadcast_to((rep >= 2)[:, None, None], (8, BOARD_EDGE, BOARD_EDGE)).astype(jnp.float32)
+
+        history_features = jnp.stack([friendly_pieces, enemy_pieces, king, rep0, rep1], axis=1)
+        history_features = history_features.reshape(40, BOARD_EDGE, BOARD_EDGE)
 
         return jnp.vstack(
             [
-                jax.vmap(make)(jnp.arange(8)).reshape(-1, BOARD_EDGE, BOARD_EDGE),
+                history_features,
                 color * ones,
                 (state.step_count / MAX_TERMINATION_STEPS) * ones,
                 (state.half_move_count.astype(jnp.float32) / MAX_HALF_MOVE_COUNT) * ones
@@ -487,15 +495,27 @@ def _shift_right(grid):
     return jnp.concatenate([jnp.zeros((BOARD_EDGE, 1), dtype=bool), grid[:, :-1]], axis=1)
 
 
-def _flood_fill(start_mask: Array, valid_mask: Array, iterations: int) -> Array:
+def _flood_fill(start_mask: Array, valid_mask: Array, max_iterations: int = 30) -> Array:
     """Expands a boolean mask into adjacent squares defined by valid_mask."""
 
-    def _expand_step(_, current_mask):
-        grid = current_mask.reshape(BOARD_EDGE, BOARD_EDGE)
-        neighbors = _shift_up(grid) | _shift_down(grid) | _shift_left(grid) | _shift_right(grid)
-        return current_mask | (neighbors.flatten() & valid_mask)
+    def cond_fn(val):
+        i, prev_mask, curr_mask = val
+        return (i < max_iterations) & jnp.any(prev_mask != curr_mask)
 
-    return lax.fori_loop(0, iterations, _expand_step, start_mask)
+    def body_fn(val):
+        i, _, current_mask = val
+        grid = current_mask.reshape((BOARD_EDGE, BOARD_EDGE))
+        neighbors = _shift_up(grid) | _shift_down(grid) | _shift_left(grid) | _shift_right(grid)
+        next_mask = current_mask | (neighbors.flatten() & valid_mask)
+        return i + 1, current_mask, next_mask
+
+    # Start loop: index 0, previous mask (empty), current mask (start)
+    _, _, final_mask = lax.while_loop(
+        cond_fn,
+        body_fn,
+        (0, jnp.zeros_like(start_mask), start_mask)
+    )
+    return final_mask
 
 
 def _check_edge_fort(state: GameState):
@@ -503,34 +523,36 @@ def _check_edge_fort(state: GameState):
 
     def _check():
         king_pos_mask = (state.board == -KING)
-        empty_mask = (state.board == 0)
-        defender_mask = (state.board == -TAFLMAN)
-        attacker_mask = (state.board == TAFLMAN)
-
-        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=empty_mask, iterations=35)
-
-        # Identify the wall
-        flood_grid = flood.reshape(BOARD_EDGE, BOARD_EDGE)
-        flood_neighbors = (_shift_up(flood_grid) | _shift_down(flood_grid) |
-                           _shift_left(flood_grid) | _shift_right(flood_grid)).flatten()
-
-        # The Wall consists of Defenders that touch the King's flood
-        wall_mask = flood_neighbors & defender_mask
-
         king_on_edge = (king_pos_mask & EDGES).any()
-        has_room = jnp.sum(flood) > 1
-        exposed_to_attacker = (flood_neighbors & attacker_mask).any()
+        def _do_flood_fill(_):
+            empty_mask = (state.board == 0)
+            defender_mask = (state.board == -TAFLMAN)
+            attacker_mask = (state.board == TAFLMAN)
 
-        empty_grid = empty_mask.reshape(BOARD_EDGE, BOARD_EDGE)
-        corner_grid = CORNERS_MASK.reshape(BOARD_EDGE, BOARD_EDGE)
-        wall_grid = wall_mask.reshape(BOARD_EDGE, BOARD_EDGE)
+            flood = _flood_fill(start_mask=king_pos_mask, valid_mask=empty_mask)
 
-        threat_grid = (empty_grid & ~flood_grid) | corner_grid
-        vertical_threats = _shift_down(threat_grid) & _shift_up(threat_grid)
-        horizontal_threats = _shift_right(threat_grid) & _shift_left(threat_grid)
+            # Identify the wall
+            flood_grid = flood.reshape(BOARD_EDGE, BOARD_EDGE)
+            flood_neighbors = (_shift_up(flood_grid) | _shift_down(flood_grid) |
+                               _shift_left(flood_grid) | _shift_right(flood_grid)).flatten()
 
-        wall_broken = (wall_grid & (vertical_threats | horizontal_threats)).any()
-        return king_on_edge & has_room & (~exposed_to_attacker) & (~wall_broken)
+            # The Wall consists of Defenders that touch the King's flood
+            wall_mask = flood_neighbors & defender_mask
+
+            has_room = jnp.sum(flood) > 1
+            exposed_to_attacker = (flood_neighbors & attacker_mask).any()
+
+            empty_grid = empty_mask.reshape(BOARD_EDGE, BOARD_EDGE)
+            corner_grid = CORNERS_MASK.reshape(BOARD_EDGE, BOARD_EDGE)
+            wall_grid = wall_mask.reshape(BOARD_EDGE, BOARD_EDGE)
+
+            threat_grid = (empty_grid & ~flood_grid) | corner_grid
+            vertical_threats = _shift_down(threat_grid) & _shift_up(threat_grid)
+            horizontal_threats = _shift_right(threat_grid) & _shift_left(threat_grid)
+
+            wall_broken = (wall_grid & (vertical_threats | horizontal_threats)).any()
+            return has_room & (~exposed_to_attacker) & (~wall_broken)
+        return lax.cond(king_on_edge, _do_flood_fill, lambda _: False, operand=None)
 
     return lax.cond(
         state.color == -1,
@@ -551,7 +573,7 @@ def _check_encirclement(state: GameState):
         king_pos_mask = (state.board > 0)
         defenders_mask = (state.board >= 0)
 
-        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=defenders_mask, iterations=35)
+        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=defenders_mask)
 
         # Check if the flood touched the edge
         escaped = (flood & EDGES).any()

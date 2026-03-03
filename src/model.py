@@ -9,8 +9,9 @@ OBS_PLANES = 43
 class ConvBlock(nnx.Module):
     def __init__(self, filter_count: int, rngs: nnx.Rngs):
         self.filter_count = filter_count
-        self.conv = nnx.Conv(in_features=OBS_PLANES, out_features=filter_count, kernel_size=(3, 3), padding=1, rngs=rngs)
-        self.bn = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
+        self.conv = nnx.Conv(in_features=OBS_PLANES, out_features=filter_count,
+                             kernel_size=(3, 3), padding=1, rngs=rngs, param_dtype=jnp.bfloat16)
+        self.bn = nnx.BatchNorm(num_features=filter_count, rngs=rngs, param_dtype=jnp.bfloat16)
 
     def __call__(self, x: jnp.ndarray, train: bool):
         x = x.astype(jnp.bfloat16)
@@ -24,12 +25,12 @@ class ConvBlock(nnx.Module):
 class ResBlock(nnx.Module):
     def __init__(self, filter_count: int, rngs: nnx.Rngs):
         self.conv1 = nnx.Conv(in_features=filter_count, out_features=filter_count,
-                              kernel_size=(3, 3), padding=1, rngs=rngs)
-        self.bn1 = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
+                              kernel_size=(3, 3), padding=1, rngs=rngs, param_dtype=jnp.bfloat16)
+        self.bn1 = nnx.BatchNorm(num_features=filter_count, rngs=rngs, param_dtype=jnp.bfloat16)
 
         self.conv2 = nnx.Conv(in_features=filter_count, out_features=filter_count,
-                              kernel_size=(3, 3), padding=1, rngs=rngs)
-        self.bn2 = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
+                              kernel_size=(3, 3), padding=1, rngs=rngs, param_dtype=jnp.bfloat16)
+        self.bn2 = nnx.BatchNorm(num_features=filter_count, rngs=rngs, param_dtype=jnp.bfloat16)
 
     def __call__(self, x: jnp.ndarray, train: bool):
         x = x.astype(jnp.bfloat16)
@@ -48,8 +49,9 @@ class ResBlock(nnx.Module):
 
 class PolicyOutBlock(nnx.Module):
     def __init__(self, filter_count: int, rngs: nnx.Rngs):
-        self.conv = nnx.Conv(in_features=filter_count, out_features=PLANES, kernel_size=(1, 1), rngs=rngs)
-        self.bn = nnx.BatchNorm(num_features=PLANES, rngs=rngs)
+        self.conv = nnx.Conv(in_features=filter_count, out_features=PLANES,
+                             kernel_size=(1, 1), rngs=rngs, param_dtype=jnp.bfloat16)
+        self.bn = nnx.BatchNorm(num_features=PLANES, rngs=rngs, param_dtype=jnp.bfloat16)
 
     def __call__(self, x: jnp.ndarray, train: bool):
         x = x.astype(jnp.bfloat16)
@@ -62,11 +64,12 @@ class PolicyOutBlock(nnx.Module):
 
 class ValueOutBlock(nnx.Module):
     def __init__(self, filter_count: int, rngs: nnx.Rngs):
-        self.conv = nnx.Conv(in_features=filter_count, out_features=1, kernel_size=(1, 1), rngs=rngs)
-        self.bn = nnx.BatchNorm(num_features=1, rngs=rngs)
+        self.conv = nnx.Conv(in_features=filter_count, out_features=1,
+                             kernel_size=(1, 1), rngs=rngs, param_dtype=jnp.bfloat16)
+        self.bn = nnx.BatchNorm(num_features=1, rngs=rngs, param_dtype=jnp.bfloat16)
 
-        self.dense1 = nnx.Linear(in_features=BOARD_EDGE ** 2, out_features=256, rngs=rngs)
-        self.dense2 = nnx.Linear(in_features=256, out_features=1, rngs=rngs)
+        self.dense1 = nnx.Linear(in_features=BOARD_EDGE ** 2, out_features=256, rngs=rngs, param_dtype=jnp.bfloat16)
+        self.dense2 = nnx.Linear(in_features=256, out_features=1, rngs=rngs, param_dtype=jnp.bfloat16)
 
     def __call__(self, x: jnp.ndarray, train: bool):
         x = x.astype(jnp.bfloat16)
@@ -109,4 +112,4 @@ class HnefataflZeroNet(nnx.Module):
         policy = self.policy_head(x, train=train)
         value = self.value_head(x, train=train)
 
-        return policy, value
+        return policy.astype(jnp.float32), value.astype(jnp.float32)

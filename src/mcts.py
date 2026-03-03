@@ -18,8 +18,9 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
         current_player=embedding._player_order[jnp.arange(action.shape[0]), next_game_state.color]
     )
 
+    next_obs = jax.vmap(env.game.observe)(next_game_state)
     local_model = nnx.merge(graph_def, model_state)
-    logits, value = local_model(next_state.observation)
+    logits, value = local_model(next_obs)
 
     rewards = next_state.rewards[jnp.arange(next_state.rewards.shape[0]), embedding.current_player]
     discounts = jnp.where(next_state.terminated, 0.0, 1.0)

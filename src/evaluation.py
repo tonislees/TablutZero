@@ -26,40 +26,49 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
     graph_def_A, model_A_state = nnx.split(model_A)
     graph_def_B, model_B_state = nnx.split(model_B)
 
-    def run_one_role(single_role_state, role_key):
+    def run_one_role(single_role_state, role_key, role_idx):
         def step_fn(loop_vars):
             step_state, key, t_mask, rewards = loop_vars
 
             is_terminal = step_state.terminated
             should_update = is_terminal & ~t_mask
 
+            # Rewards are captured once when the game first hits terminal
             next_rewards = jnp.where(should_update[:, None], step_state.rewards, rewards)
             next_mask = t_mask | is_terminal
 
-            key_A, key_B, next_key = jax.random.split(key, 3)
-            local_model_A = nnx.merge(graph_def_A, model_A_state)
-            local_model_B = nnx.merge(graph_def_B, model_B_state)
+            key_A, key_B, key_env, next_key = jax.random.split(key, 4)
 
+            # All games in this role-batch are synchronized on turn, even if some are terminal,
+            # because we use env._step which always flips color.
             is_p0_turn = (step_state.current_player[0] == 0)
 
+            from src.mcts import run_mcts_functional
             action = lax.cond(
                 is_p0_turn,
-                lambda: run_mcts(local_model_A, step_state, key_A, num_simulations, env).action,
-                lambda: run_mcts(local_model_B, step_state, key_B, num_simulations, env).action
+                lambda: run_mcts_functional(graph_def_A, model_A_state, step_state, key_A, num_simulations, env).action,
+                lambda: run_mcts_functional(graph_def_B, model_B_state, step_state, key_B, num_simulations, env).action
             )
 
-            def update_pbar(_):
+            def update_pbar_role(k):
                 global _eval_pbar
                 if '_eval_pbar' in globals():
                     _eval_pbar.update(1)
 
-            jax.debug.callback(update_pbar, key)
+            # Only update progress bar from role 0 to avoid double counting
+            lax.cond(role_idx == 0, lambda: jax.debug.callback(update_pbar_role, None), lambda: None)
 
-            return jax.vmap(env.step)(step_state, action), next_key, next_mask, next_rewards
+            # Use _step directly to bypass pgx's auto-reset and turn-stalling on terminal states.
+            # We pass keys but our _step ignores them.
+            keys_env = jax.random.split(key_env, step_state.current_player.shape[0])
+            return jax.vmap(env._step)(step_state, action, keys_env), next_key, next_mask, next_rewards
 
         def cond_fn(loop_vars):
-            _, _, t_mask, _ = loop_vars
-            return ~jnp.all(t_mask)
+            step_state, _, t_mask, _ = loop_vars
+            # Safety stop at 512, though is_terminal should already trigger it
+            not_all_terminated = ~jnp.all(t_mask)
+            within_limits = jnp.all(step_state._x.step_count < 512)
+            return not_all_terminated & within_limits
 
         termination_mask = jnp.zeros_like(single_role_state.terminated, dtype=jnp.bool_)
         init_rewards = jnp.zeros_like(single_role_state.rewards)
@@ -68,7 +77,7 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
         return final_rewards
 
     keys = jax.random.split(rng_key, 2)
-    return jax.vmap(run_one_role)(state, keys)
+    return jax.vmap(run_one_role)(state, keys, jnp.arange(2))
 
 
 class Evaluator:

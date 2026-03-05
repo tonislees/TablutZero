@@ -24,6 +24,9 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     )
 
     next_obs = jax.vmap(env.game.observe)(next_game_state)
+    
+    # Use functional call to avoid full merge overhead if possible, 
+    # but NNX merge is required to recover the module's __call__
     local_model = nnx.merge(graph_def, model_state)
     logits, value = local_model(next_obs)
 
@@ -40,12 +43,13 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     return output, next_state
 
 
-def run_mcts(model: nnx.Module, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env):
+def run_mcts_functional(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
-    graph_def, state = nnx.split(model)
-    root_logits, root_value = model(env_state.observation, train=False)
+    # Root inference
+    local_model = nnx.merge(graph_def, model_state)
+    root_logits, root_value = local_model(env_state.observation, train=False)
 
     root = mctx.RootFnOutput(
         prior_logits=root_logits,
@@ -56,7 +60,7 @@ def run_mcts(model: nnx.Module, env_state, rng_key: jax.Array, num_simulations: 
     rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def)
 
     policy_output = mctx.gumbel_muzero_policy(
-        params=state,
+        params=model_state,
         rng_key=rng_key,
         root=root,
         recurrent_fn=rec_fn,
@@ -66,3 +70,7 @@ def run_mcts(model: nnx.Module, env_state, rng_key: jax.Array, num_simulations: 
     )
 
     return policy_output
+
+def run_mcts(model: nnx.Module, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env):
+    graph_def, state = nnx.split(model)
+    return run_mcts_functional(graph_def, state, env_state, rng_key, num_simulations, env)

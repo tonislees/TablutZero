@@ -55,9 +55,9 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
 
     def step_fn(state, key):
         key_reset, key_search = jax.random.split(key)
-        local_model = nnx.merge(graph_def, model_state)
-
-        mcts_output = run_mcts(local_model, state, key_search, num_simulations, env)
+        
+        from src.mcts import run_mcts_functional
+        mcts_output = run_mcts_functional(graph_def, model_state, state, key_search, num_simulations, env)
         actions = mcts_output.action
         next_env_state = jax.vmap(env.step)(state, actions)
 
@@ -237,7 +237,7 @@ class Coach:
             if iteration % eval_interval == 0 and iteration >= eval_start:
                 elo = self.evaluator.evaluate_model(iteration)
                 self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
-                print(f">>> ELO | {elo}")
+                print(f">>> ELO     | {elo}")
 
             t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
             p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]

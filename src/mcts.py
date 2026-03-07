@@ -84,6 +84,8 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
 
     rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, player=player)
 
+    g_scale = jnp.where(apply_dirichlet[:, None], 2.0, 1.0)
+
     policy_output = mctx.gumbel_muzero_policy(
         params=model_state,
         rng_key=rng_key,
@@ -91,7 +93,8 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
         recurrent_fn=rec_fn,
         num_simulations=num_simulations,
         invalid_actions=~env_state.legal_action_mask,
-        qtransform=mctx.qtransform_completed_by_mix_value
+        qtransform=mctx.qtransform_completed_by_mix_value,
+        gumbel_scale=g_scale
     )
 
     return policy_output

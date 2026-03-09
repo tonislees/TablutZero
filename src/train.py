@@ -216,6 +216,7 @@ class Coach:
         print(f">>> Self-play games finished: {total_terminated}")
         print(
             f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
+        print(f"    Attacker reward: {self.reward_consts[0]} | Defender reward: {self.reward_consts[2]}")
 
     def _run_training_loop(self):
         self.model.train()

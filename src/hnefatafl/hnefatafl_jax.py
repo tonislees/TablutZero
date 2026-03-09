@@ -571,10 +571,10 @@ def _check_edge_fort(state: GameState):
             exposed_to_attacker = (flood_neighbors & attacker_mask).any()
 
             empty_grid = empty_mask.reshape(BOARD_EDGE, BOARD_EDGE)
-            corner_grid = CORNERS_MASK.reshape(BOARD_EDGE, BOARD_EDGE)
+            attacker_grid = attacker_mask.reshape(BOARD_EDGE, BOARD_EDGE)
             wall_grid = wall_mask.reshape(BOARD_EDGE, BOARD_EDGE)
 
-            threat_grid = (empty_grid & ~flood_grid) | corner_grid
+            threat_grid = (empty_grid & ~flood_grid) | attacker_grid
             vertical_threats = _shift_down(threat_grid) & _shift_up(threat_grid)
             horizontal_threats = _shift_right(threat_grid) & _shift_left(threat_grid)
 

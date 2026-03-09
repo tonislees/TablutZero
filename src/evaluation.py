@@ -74,7 +74,8 @@ class Evaluator:
             rng_key=self.rngs.default(),
             num_simulations=self.cfg.mcts.simulations,
             env=self.env,
-            batch_size=self.cfg.train.batch_size // 4
+            batch_size=self.cfg.train.batch_size // 4,
+            dirichlet_fraction=self.cfg.train.dirichlet_fraction
         ))
         rewards_p1 = jax.device_get(evaluate(
             model_A=self.model,
@@ -83,7 +84,8 @@ class Evaluator:
             rng_key=self.rngs.default(),
             num_simulations=self.cfg.mcts.simulations,
             env=self.env,
-            batch_size=self.cfg.train.batch_size // 4
+            batch_size=self.cfg.train.batch_size // 4,
+            dirichlet_fraction=self.cfg.train.dirichlet_fraction
         ))
         _eval_pbar.close()
 
@@ -267,8 +269,8 @@ class Evaluator:
         return opponent_name
 
 
-@partial(nnx.jit, static_argnames=('num_simulations', 'env', 'batch_size'))
-def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size):
+@partial(nnx.jit, static_argnames=('num_simulations', 'env', 'batch_size', 'dirichlet_fraction'))
+def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size, dirichlet_fraction):
     graph_def_A, model_A_state = nnx.split(model_A)
     graph_def_B, model_B_state = nnx.split(model_B)
 
@@ -288,9 +290,9 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size)
         action = lax.cond(
             is_p0,
             lambda: run_mcts(graph_def_A, model_A_state, step_state, key_A, num_simulations, env,
-                             step_state.current_player, batch_size, attacker_explore=False).action,
+                             step_state.current_player, batch_size, dirichlet_fraction, attacker_explore=False).action,
             lambda: run_mcts(graph_def_B, model_B_state, step_state, key_B, num_simulations, env,
-                             step_state.current_player, batch_size, attacker_explore=False).action
+                             step_state.current_player, batch_size, dirichlet_fraction, attacker_explore=False).action
         )
 
         def update_pbar(_):

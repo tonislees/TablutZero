@@ -104,7 +104,7 @@ class MetricsTracker:
         filename = f"metrics_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
         file_dir = self.dirs['metrics'] / filename
         with open(file_dir, 'w') as f:
-            json.dump(self.metrics_history, f)
+            json.dump(self.metrics_history, f, indent=4)
 
     def _load_metrics(self, load_checkpoint: bool) -> dict[str, list[float]]:
         """
@@ -115,6 +115,9 @@ class MetricsTracker:
             'total_loss': [],
             'policy_loss': [],
             'value_loss': [],
+            'attacker_win_rate': [],
+            'defender_win_rate': [],
+            'draw_rate': [],
             'elo_evaluation': [],
             'frames': []
         }

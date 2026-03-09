@@ -10,7 +10,7 @@ from src.utils import policy_value_by_player
 
 
 def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
-                 embedding, env, graph_def, player: jax.Array):
+                 embedding, env, graph_def, player: jax.Array, reward_consts: jax.Array):
     next_game_state = jax.vmap(env.game.mcts_step)(embedding._x, action)
 
     batch_idx = jnp.arange(action.shape[0])[:, None]
@@ -18,10 +18,18 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
     is_term, raw_rewards = jax.vmap(env.game.mcts_status)(next_game_state)
 
+    r_a_win, r_a_loss, r_d_win, r_d_loss = reward_consts
+    att_raw = raw_rewards[:, 0]
+    def_raw = raw_rewards[:, 1]
+
+    scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, 0.0))
+    scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, 0.0))
+    scaled_rewards = jnp.stack([scaled_att, scaled_def], axis=1)
+
     next_state = embedding.replace(
         _x=next_game_state,
         terminated=is_term,
-        rewards=raw_rewards[batch_idx, embedding._player_order],
+        rewards=scaled_rewards[batch_idx, embedding._player_order],
         current_player=embedding._player_order[jnp.arange(action.shape[0]), color_idx]
     )
 
@@ -44,7 +52,8 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
 
 def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
-             player: jax.Array, batch_size: int, attacker_explore: bool = True):
+             player: jax.Array, batch_size: int, dirichlet_fraction, attacker_explore: bool = True,
+             reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0])):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
@@ -64,10 +73,9 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
         alpha=jnp.full((num_actions,), 0.3),
         shape=(batch_size,)
     )
-    fraction = 0.25
 
     probs = jax.nn.softmax(root_logits)
-    mixed_probs = (1 - fraction) * probs + fraction * dirichlet_noise
+    mixed_probs = (1 - dirichlet_fraction) * probs + dirichlet_fraction * dirichlet_noise
 
     mixed_probs = jnp.where(legal_mask, mixed_probs, 1e-8)
     mixed_probs = mixed_probs / jnp.sum(mixed_probs, axis=-1, keepdims=True)
@@ -82,7 +90,7 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
         embedding=env_state
     )
 
-    rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, player=player)
+    rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, player=player, reward_consts=reward_consts)
 
     g_scale = jnp.where(apply_dirichlet[:, None], 2.0, 1.0)
 

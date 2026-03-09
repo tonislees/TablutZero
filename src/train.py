@@ -19,7 +19,7 @@ from src.hnefatafl.hnefatafl import Hnefatafl
 from src.mcts import run_mcts
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
-from src.utils import dir_safe, add_to_buffer_cpu, train_step
+from src.utils import dir_safe, add_to_buffer_cpu, train_step, calculate_dynamic_rewards
 
 
 class Coach:
@@ -74,6 +74,7 @@ class Coach:
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.metrics_tracker = MetricsTracker(cfg, self.dirs)
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
+        self.reward_consts = [1, -1, 1, -1] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r]
 
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
@@ -170,19 +171,20 @@ class Coach:
             num_steps = self.cfg.train.self_play_steps,
             num_simulations=self.cfg.mcts.simulations,
             env=self.env,
-            batch_size=self.cfg.train.batch_size
+            batch_size=self.cfg.train.batch_size,
+            reward_consts=jnp.array(self.reward_consts, dtype=jnp.float32),
+            dirichlet_fraction=self.cfg.train.dirichlet_fraction
         )
 
         _self_play_pbar.close()
         if '_self_play_pbar' in globals():
             del globals()['_self_play_pbar']
 
-        self._log_results(terminals, rewards)
+        self._process_results(terminals, rewards)
         final_transitions_cpu = jax.device_get(final_transitions)
         self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions_cpu, self.buffer)
 
-    @staticmethod
-    def _log_results(terminals, rewards):
+    def _process_results(self, terminals, rewards):
         terminals = jax.device_get(terminals)
         attacker_rewards = jax.device_get(rewards)
 
@@ -197,6 +199,18 @@ class Coach:
             draw_rate = total_draws / total_terminated
         else:
             a_win_rate = d_win_rate = draw_rate = 0.0
+
+        rates = (a_win_rate, d_win_rate, draw_rate)
+        names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
+        past_5_avg = [] # [Attacker avg, defender avg, draw avg]
+        history_len = max(1, len(self.metrics_tracker.metrics_history['attacker_win_rate']))
+
+        for rate, name in zip(rates, names):
+            history = self.metrics_tracker.metrics_history[name]
+            history.append(rate)
+            past_5_avg.append(history[-min(history_len, 5)] / min(history_len, 5))
+
+        self.reward_consts = calculate_dynamic_rewards(past_5_avg[0], past_5_avg[1])
 
         print(f">>> Self-play games finished: {total_terminated}")
         print(
@@ -242,14 +256,14 @@ class Coach:
 
 
 @partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env'))
-def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size):
+def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size, reward_consts, dirichlet_fraction):
     graph_def, model_state = nnx.split(model)
 
     def step_fn(state, key):
         key_reset, key_search = jax.random.split(key)
 
         mcts_output = run_mcts(graph_def, model_state, state, key_search, num_simulations,
-                               env, state.current_player, batch_size=batch_size)
+                               env, state.current_player, batch_size, dirichlet_fraction, reward_consts=reward_consts)
         actions = mcts_output.action
         next_env_state = jax.vmap(env.step)(state, actions)
 
@@ -264,11 +278,23 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
 
         auto_reset_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
 
-        # Save temporary states to an array
-        batch_indices = jnp.arange(batch_size)
-        current_player_rewards = next_env_state.rewards[batch_indices, state.current_player]
+        r_a_win, r_a_loss, r_d_win, r_d_loss = reward_consts
+
         internal_rewards = jax.vmap(env.game.rewards)(next_env_state._x)
-        attacker_rewards = internal_rewards[:, 0]
+        att_raw = internal_rewards[:, 0]
+        def_raw = internal_rewards[:, 1]
+
+        scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, 0.0))
+        scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, 0.0))
+        scaled_internal_rewards = jnp.stack([scaled_att, scaled_def], axis=1)
+
+        scaled_player_rewards = jax.vmap(lambda r, order: r[order])(
+            scaled_internal_rewards, next_env_state._player_order
+        )
+
+        batch_indices = jnp.arange(batch_size)
+        current_player_rewards = scaled_player_rewards[batch_indices, state.current_player]
+        attacker_rewards = att_raw
 
         transition = {
             "observation": state.observation,

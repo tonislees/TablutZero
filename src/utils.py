@@ -24,12 +24,6 @@ def loss_fn(model: nnx.Module, batch: dict, train=True):
     value_loss = optax.l2_loss(
         predictions=value.squeeze(), targets=batch['value_target']
     ).mean()
-    is_attacker = (batch['player'] == 0)
-    weights = jnp.where(is_attacker, 3.0, 1.0)
-
-    policy_loss = (policy_loss * weights).mean()
-    value_loss = (value_loss * weights).mean()
-
     total_loss = policy_loss + value_loss
     return total_loss, (policy_loss, value_loss)
 
@@ -60,3 +54,20 @@ def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict):
     return loss, p_loss, v_loss
 
 
+def calculate_dynamic_rewards(p_a_win: float, p_d_win: float) -> tuple[float, float, float, float]:
+    """
+    Calculates dynamic normalizer for results with the formula:
+    (p_win x r_win) + (p_loss x r_loss) = 0, where p_win/p_loss are of the advantaged side.
+    Returns [r_a_win, r_a_loss, r_d_win, r_d_loss]
+    """
+    if p_a_win == 0.0 or p_d_win == 0.0:
+        return 1.0, -1.0, 1.0, -1.0
+
+    if p_a_win > p_d_win: # Attacker has the advantage
+        r_a_loss = -1.0
+        r_a_win = p_d_win / p_a_win
+        return r_a_win, r_a_loss, -r_a_loss, -r_a_win
+    else: # Defender has the advantage
+        r_d_loss = -1.0
+        r_d_win = p_a_win / p_d_win
+        return -r_d_loss, -r_d_win, r_d_win, r_d_loss

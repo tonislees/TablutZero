@@ -290,9 +290,9 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size,
         action = lax.cond(
             is_p0,
             lambda: run_mcts(graph_def_A, model_A_state, step_state, key_A, num_simulations, env,
-                             step_state.current_player, batch_size, dirichlet_fraction, attacker_explore=False).action,
+                             batch_size, dirichlet_fraction, attacker_explore=False).action,
             lambda: run_mcts(graph_def_B, model_B_state, step_state, key_B, num_simulations, env,
-                             step_state.current_player, batch_size, dirichlet_fraction, attacker_explore=False).action
+                             batch_size, dirichlet_fraction, attacker_explore=False).action
         )
 
         def update_pbar(_):

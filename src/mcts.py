@@ -10,7 +10,7 @@ from src.utils import policy_value_by_player
 
 
 def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
-                 embedding, env, graph_def, player: jax.Array, reward_consts: jax.Array):
+                 embedding, env, graph_def, reward_consts: jax.Array):
     next_game_state = jax.vmap(env.game.step)(embedding._x, action)
 
     batch_idx = jnp.arange(action.shape[0])[:, None]
@@ -36,7 +36,8 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     next_obs = jax.vmap(env.game.observe)(next_game_state)
 
     local_model = nnx.merge(graph_def, model_state)
-    logits, value = policy_value_by_player(local_model(next_obs), player)
+    role = (next_game_state.color + 1) // 2
+    logits, value = policy_value_by_player(local_model(next_obs), role)
 
     rewards = next_state.rewards[jnp.arange(next_state.rewards.shape[0]), embedding.current_player]
     discounts = jnp.where(next_state.terminated, 0.0, -1.0)
@@ -52,14 +53,15 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
 
 def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
-             player: jax.Array, batch_size: int, dirichlet_fraction, attacker_explore: bool = True,
+             batch_size: int, dirichlet_fraction, attacker_explore: bool = True,
              reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0])):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
     # Root inference
     local_model = nnx.merge(graph_def, model_state)
-    root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), player)
+    role = (env_state.color + 1) // 2
+    root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), role)
 
     is_attacker = (env_state._x.color == -1)
 
@@ -90,7 +92,7 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
         embedding=env_state
     )
 
-    rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, player=player, reward_consts=reward_consts)
+    rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, reward_consts=reward_consts)
 
     g_scale = jnp.where(apply_dirichlet[:, None], 2.0, 1.0)
 

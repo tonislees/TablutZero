@@ -266,7 +266,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations,
         key_reset, key_search = jax.random.split(key)
 
         mcts_output = run_mcts(graph_def, model_state, state, key_search, num_simulations,
-                               env, state.current_player, batch_size, dirichlet_fraction, attacker_explore, reward_consts=reward_consts)
+                               env, batch_size, dirichlet_fraction, attacker_explore, reward_consts=reward_consts)
         actions = mcts_output.action
         next_env_state = jax.vmap(env.step)(state, actions)
 
@@ -306,7 +306,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations,
             "attacker_reward": attacker_rewards,
             "terminated": next_env_state.terminated,
             "legal_action_mask": state.legal_action_mask,
-            "player": state.current_player
+            "player": (state._x.color + 1) // 2
         }
 
         def update_pbar(_):

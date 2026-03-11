@@ -2,24 +2,25 @@ import pygame
 import sys
 import jax
 import jax.numpy as jnp
-from src.hnefatafl.hnefatafl_jax import Action
-
+from src.hnefatafl.hnefatafl_jax import Action, BOARD_EDGE, BOARD_SIZE, THRONE
 
 SCREEN_SIZE = 720
-GRID_SIZE = 11
+GRID_SIZE = BOARD_EDGE
 CELL_SIZE = SCREEN_SIZE // GRID_SIZE
 FPS = 60
 
-COLOR_BG = (240, 217, 181)  # Light Wood
-COLOR_GRID = (139, 69, 19)  # Dark Wood
-COLOR_HIGHLIGHT = (100, 255, 100)  # Green for valid moves
-COLOR_SELECTED = (255, 255, 0)  # Yellow for the selected piece
-COLOR_THRONE = (160, 82, 45)  # Sienna
+COLOR_BG = (240, 217, 181)
+COLOR_GRID = (139, 69, 19)
+COLOR_HIGHLIGHT = (100, 255, 100)
+COLOR_SELECTED = (255, 255, 0)
+COLOR_THRONE = (160, 82, 45)
 COLOR_CORNER = (160, 82, 45)
 
-COLOR_ATTACKER = (20, 20, 20)  # Black
-COLOR_DEFENDER = (240, 240, 230)  # White/Cream
-COLOR_KING = (212, 175, 55)  # Gold
+COLOR_ATTACKER = (20, 20, 20)
+COLOR_DEFENDER = (240, 240, 230)
+COLOR_KING = (212, 175, 55)
+
+CORNERS = [0, GRID_SIZE - 1, BOARD_SIZE - GRID_SIZE, BOARD_SIZE - 1]
 
 
 class HnefataflUI:
@@ -32,7 +33,6 @@ class HnefataflUI:
 
         self.engine = logic_engine
 
-        # UI State
         self.selected_sq = None
         self.valid_moves_for_selected = []
         self.move_history = []
@@ -43,14 +43,9 @@ class HnefataflUI:
         return int(self.engine.game_state.board[idx])
 
     def get_legal_destinations(self, from_sq):
-        """Finds all legal target squares for the piece at from_sq."""
         legal_mask = self.engine.state.legal_action_mask
         destinations = []
-
-        # Get all valid action indices
         valid_indices = jnp.where(legal_mask)[0]
-
-        # Filter for actions starting from 'from_sq'
         for label_idx in valid_indices.tolist():
             action = Action.from_label(label_idx)
             if int(action.from_sq) == from_sq:
@@ -59,24 +54,18 @@ class HnefataflUI:
 
     def draw_board(self):
         self.screen.fill(COLOR_BG)
-        current_turn = int(self.engine.game_state.color)  # -1 = Attacker, 1 = Defender
+        current_turn = int(self.engine.game_state.color)
 
-        corners = [0, 10, 110, 120]
-        throne = 60  # Center (5,5) -> 5*11 + 5 = 60
-
-        for sq in corners + [throne]:
+        for sq in CORNERS + [THRONE]:
             r, c = divmod(sq, GRID_SIZE)
-            # Flip Y because Pygame (0,0) is Top-Left, JAX (0,0) is Bottom-Left
             ui_r = GRID_SIZE - 1 - r
             rect = (c * CELL_SIZE, ui_r * CELL_SIZE, CELL_SIZE, CELL_SIZE)
             pygame.draw.rect(self.screen, COLOR_CORNER, rect)
 
-        # Draw Grid Lines
         for i in range(GRID_SIZE + 1):
             pygame.draw.line(self.screen, COLOR_GRID, (0, i * CELL_SIZE), (SCREEN_SIZE, i * CELL_SIZE), 2)
             pygame.draw.line(self.screen, COLOR_GRID, (i * CELL_SIZE, 0), (i * CELL_SIZE, SCREEN_SIZE), 2)
 
-        # Draw Selection & Highlights
         if self.selected_sq is not None:
             r, c = divmod(self.selected_sq, GRID_SIZE)
             ui_r = GRID_SIZE - 1 - r
@@ -89,10 +78,10 @@ class HnefataflUI:
                 center = (dc * CELL_SIZE + CELL_SIZE // 2, dui_r * CELL_SIZE + CELL_SIZE // 2)
                 pygame.draw.circle(self.screen, COLOR_HIGHLIGHT, center, CELL_SIZE // 6)
 
-        # Draw Pieces (Loop over all 121 squares)
-        for idx in range(GRID_SIZE * GRID_SIZE):
+        for idx in range(BOARD_SIZE):
             piece = self.get_piece_at(idx)
-            if piece == 0: continue
+            if piece == 0:
+                continue
 
             r, c = divmod(idx, GRID_SIZE)
             ui_r = GRID_SIZE - 1 - r
@@ -100,33 +89,32 @@ class HnefataflUI:
             radius = CELL_SIZE // 2 - 6
 
             is_attacker = False
-            if current_turn == -1:  # Attacker Turn
+            if current_turn == -1:
                 if piece > 0: is_attacker = True
-            else:  # Defender Turn
+            else:
                 if piece < 0: is_attacker = True
 
-            # Draw Piece
-            if abs(piece) == 2:  # KING
+            if abs(piece) == 2:
                 pygame.draw.circle(self.screen, COLOR_KING, center, radius)
-                # Cross on King
                 pygame.draw.line(self.screen, (0, 0, 0), (center[0], center[1] - 8), (center[0], center[1] + 8), 3)
                 pygame.draw.line(self.screen, (0, 0, 0), (center[0] - 8, center[1]), (center[0] + 8, center[1]), 3)
             elif is_attacker:
                 pygame.draw.circle(self.screen, COLOR_ATTACKER, center, radius)
-            else:  # Defender
+            else:
                 pygame.draw.circle(self.screen, COLOR_DEFENDER, center, radius)
-                pygame.draw.circle(self.screen, (0, 0, 0), center, radius, 1)  # Outline
+                pygame.draw.circle(self.screen, (0, 0, 0), center, radius, 1)
 
     def handle_click(self, pos):
-        if self.game_over: return
+        if self.game_over:
+            return
 
         col = pos[0] // CELL_SIZE
         ui_row = pos[1] // CELL_SIZE
-
         row = GRID_SIZE - 1 - ui_row
         idx = row * GRID_SIZE + col
 
-        if not (0 <= idx < GRID_SIZE * GRID_SIZE): return
+        if not (0 <= idx < BOARD_SIZE):
+            return
 
         clicked_piece = self.get_piece_at(idx)
 
@@ -144,12 +132,10 @@ class HnefataflUI:
             self.valid_moves_for_selected = []
 
     def execute_move(self, from_sq, to_sq):
-        # UI Feedback
         uci = self.engine._sq_to_uci(from_sq) + self.engine._sq_to_uci(to_sq)
         self.move_history.append(uci)
         print(f"Move: {uci}")
 
-        # Find Action Label
         legal_mask = self.engine.state.legal_action_mask
         valid_indices = jnp.where(legal_mask)[0]
 
@@ -160,17 +146,11 @@ class HnefataflUI:
                 action_label = label_idx
                 break
 
-        # Step Engine
         if action_label != -1:
-            # === KEY HANDLING UPDATE ===
-            # JAX requires a new key for every step.
-            # We assume self.engine is the PlayHnefatafl wrapper which has self.engine.key_env
             step_key, self.engine.key_env = jax.random.split(self.engine.key_env)
-
             self.engine.state = self.engine.step_fn(self.engine.state, action_label, step_key)
             self.engine.game_state = self.engine.state._x
 
-            # Check End Conditions
             if self.engine.env.game.is_terminal(self.engine.game_state):
                 self.game_over = True
                 rewards = self.engine.env.game.rewards(self.engine.game_state)
@@ -181,7 +161,6 @@ class HnefataflUI:
                     winner = "DEFENDERS WON!"
                 else:
                     winner = "DRAW!"
-
                 print(f"\n=== {winner} ===")
 
     def run(self):
@@ -194,7 +173,7 @@ class HnefataflUI:
                     if event.button == 1:
                         self.handle_click(event.pos)
                 elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_r:  # Reset hook
+                    if event.key == pygame.K_r:
                         self.engine.reset()
                         self.game_over = False
                         self.move_history = []
@@ -203,7 +182,6 @@ class HnefataflUI:
             self.draw_board()
 
             if self.game_over:
-                # Simple Game Over overlay
                 text = self.font.render("GAME OVER", True, (255, 50, 50))
                 rect = text.get_rect(center=(SCREEN_SIZE // 2, SCREEN_SIZE // 2))
                 pygame.draw.rect(self.screen, (255, 255, 255), rect.inflate(20, 10))

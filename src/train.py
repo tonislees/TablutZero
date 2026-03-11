@@ -19,7 +19,7 @@ from src.hnefatafl.hnefatafl import Hnefatafl
 from src.mcts import run_mcts
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
-from src.utils import dir_safe, add_to_buffer_cpu, train_step, calculate_dynamic_rewards, policy_value_by_player
+from src.utils import dir_safe, add_to_buffer_cpu, train_step, policy_value_by_player
 
 
 class Coach:
@@ -56,9 +56,8 @@ class Coach:
         graph_def, state = nnx.split(self.model)
         state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
         self.model = nnx.merge(graph_def, state)
-        self.optimizer: nnx.Optimizer = nnx.Optimizer(
-            self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
-        )
+        self.current_lr = cfg.train.initial_learning_rate
+        self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
 
         # Environment
         self.env = Hnefatafl()
@@ -87,14 +86,31 @@ class Coach:
         cpu_device = jax.devices('cpu')[0]
         with jax.default_device(cpu_device):
             example_transition = {
-                "observation": jnp.zeros((11, 11, 43), dtype=jnp.float32),
-                "policy_target": jnp.zeros((121 * 40,), dtype=jnp.float32),
+                "observation": jnp.zeros((9, 9, 43), dtype=jnp.float32),
+                "policy_target": jnp.zeros((81 * 32,), dtype=jnp.float32),
                 "value_target": jnp.zeros((), dtype=jnp.float32),
-                "legal_action_mask": jnp.zeros((121 * 40,), dtype=jnp.bool_),
+                "legal_action_mask": jnp.zeros((81 * 32,), dtype=jnp.bool_),
                 "player": jnp.zeros((), dtype=jnp.int32)
             }
             self.buffer_state = self.buffer.init(example_transition)
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
+
+    def _load_optimizer(self, load_checkpoint: bool):
+        optimizer = nnx.Optimizer(
+            self.model,
+            optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adamw(learning_rate=self.current_lr)
+            ),
+            wrt=nnx.Param
+        )
+
+        if load_checkpoint and hasattr(self, '_restored_opt_state'):
+            opt_graph_def, _ = nnx.split(optimizer)
+            optimizer = nnx.merge(opt_graph_def, self._restored_opt_state)
+            del self._restored_opt_state
+
+        return optimizer
 
     def _get_last_iteration(self):
         """
@@ -107,18 +123,54 @@ class Coach:
         print(dirs)
         return dirs[-1]
 
-    def _load_model(self, model_dir: Path, load_checkpoint: bool) -> HnefataflZeroNet:
-        """
-        Loads previous checkpoint if load_old or a new instance if not.
+    def _maybe_reduce_lr(self):
+        history = self.metrics_tracker.metrics_history['total_loss']
+        if len(history) < 10:
+            return
+        recent = sum(history[-5:]) / 5
+        previous = sum(history[-10:-5]) / 5
+        improvement = (previous - recent) / previous
+        if improvement < 0.01:
+            self.current_lr = max(self.current_lr * 0.5, 1e-5)
+            self.optimizer = nnx.Optimizer(
+                self.model,
+                optax.chain(
+                    optax.clip_by_global_norm(1.0),
+                    optax.adamw(learning_rate=self.current_lr)
+                ),
+                wrt=nnx.Param
+            )
+            print(f"  LR reduced to {self.current_lr}")
 
-        Returns the loaded model.
-        """
-        model = HnefataflZeroNet(depth=self.cfg.model.depth, filter_count=self.cfg.model.filter_count,
-                                 rngs=self.rngs)
+    def _load_model(self, model_dir: Path, load_checkpoint: bool) -> HnefataflZeroNet:
+        model = HnefataflZeroNet(
+            depth=self.cfg.model.depth,
+            filter_count=self.cfg.model.filter_count,
+            rngs=self.rngs
+        )
         if load_checkpoint and model_dir.exists() and any(model_dir.iterdir()):
             graph_def, abstract_state = nnx.split(model)
-            restored_state = self.checkpointer.restore(model_dir, abstract_state)
-            model = nnx.merge(graph_def, restored_state)
+
+            temp_opt = nnx.Optimizer(
+                model,
+                optax.chain(
+                    optax.clip_by_global_norm(1.0),
+                    optax.adamw(learning_rate=self.cfg.train.learning_rate)
+                ),
+                wrt=nnx.Param
+            )
+            _, abstract_opt_state = nnx.split(temp_opt)
+
+            abstract_checkpoint = {
+                'model': abstract_state,
+                'optimizer': abstract_opt_state,
+                'lr': 0.0
+            }
+            restored = self.checkpointer.restore(model_dir, abstract_checkpoint)
+
+            model = nnx.merge(graph_def, restored['model'])
+            self.current_lr = restored['lr']
+            self._restored_opt_state = restored['optimizer']
 
         return model
 
@@ -138,7 +190,6 @@ class Coach:
             if iteration % eval_interval == 0 and iteration >= eval_start:
                 elo = self.evaluator.evaluate_model(iteration)
                 self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
-                print(f">>> ELO     | {elo}")
 
             t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
             p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]
@@ -227,7 +278,7 @@ class Coach:
 
         for _ in pbar:
             rng_key = self.rngs.split()
-            batch = self.buffer.sample(self.buffer_state, rng_key)
+            batch = self.sample_fn(self.buffer_state, rng_key)
             training_data = batch.experience.first
             training_data = jax.tree_util.tree_map(
                 lambda x: jax.device_put(x, self.data_sharding), training_data
@@ -251,8 +302,14 @@ class Coach:
 
     def _save_progress(self):
         """Saves the model parameters, loss data, and evaluation data."""
-        _, state = nnx.split(self.model)
-        self.checkpointer.save(self.dirs['checkpoints'], state, force=True)
+        _, model_state = nnx.split(self.model)
+        _, opt_state = nnx.split(self.optimizer)
+        checkpoint = {
+            'model': model_state,
+            'optimizer': opt_state,
+            'lr': self.current_lr
+        }
+        self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
         self.evaluator.save_eval_pool()
         self.metrics_tracker.save_metrics()
 

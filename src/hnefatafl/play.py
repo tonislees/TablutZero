@@ -3,8 +3,10 @@ from flax import nnx
 import jax.numpy as jnp
 
 from src.hnefatafl.hnefatafl import Hnefatafl
-from src.hnefatafl.hnefatafl_jax import GameState, Action
+from src.hnefatafl.hnefatafl_jax import GameState, Action, BOARD_EDGE
 from src.hnefatafl.ui import HnefataflUI
+
+FILE_LETTERS = 'abcdefghijk'
 
 
 class PlayHnefatafl:
@@ -19,8 +21,8 @@ class PlayHnefatafl:
         self.state = jax.tree_util.tree_map(lambda x: x[0], batched_state)
         self.step_fn = jax.jit(self.env.step)
         self.game_state: GameState = self.state._x
-        self.board_edge = 11
-        self.columns = {'a': 0, 'b': 1, 'c': 2, 'd': 3, 'e': 4, 'f': 5, 'g': 6, 'h': 7, 'i': 8, 'j': 9, 'k': 10}
+        self.board_edge = BOARD_EDGE
+        self.columns = {FILE_LETTERS[i]: i for i in range(BOARD_EDGE)}
 
     def reset(self):
         batched_state = jax.jit(jax.vmap(self.env.init))(
@@ -44,18 +46,14 @@ class PlayHnefatafl:
                 row_str += f'{pieces[int(board[row, column] * player)]}  |  '
             board_strings.append(row_str)
             board_strings.append(border)
-        board_strings.append('      ' + '     '.join(list(self.columns.keys())[:self.board_edge]))
+        board_strings.append('      ' + '     '.join(list(self.columns.keys())))
         print('\n'.join(row for row in board_strings))
 
     def _sq_to_uci(self, sq):
         row = sq // self.board_edge
         col = sq % self.board_edge
-
         rank_str = str(row + 1)
-
-        files = list(self.columns.keys())
-        file_str = files[col]
-
+        file_str = FILE_LETTERS[col]
         return file_str + rank_str
 
     def uci_to_action(self, uci: str):
@@ -97,13 +95,10 @@ class PlayHnefatafl:
         valid_indices = jnp.where(legal_action_mask)[0]
 
         moves_uci = []
-
         for label_idx in valid_indices.tolist():
             action = Action.from_label(label_idx)
-
             f_sq = int(action.from_sq)
             t_sq = int(action.to_sq)
-
             uci = self._sq_to_uci(f_sq) + self._sq_to_uci(t_sq)
             moves_uci.append(uci)
         moves_uci.sort()
@@ -119,7 +114,7 @@ class PlayHnefatafl:
             print('Wrong format or illegal move: {}', e)
 
     def game_loop(self):
-        game.print_board()
+        self.print_board()
         while True:
             self.show_legal_moves()
             print('Attacker to move' if self.game_state.color < 0 else 'Defender to move')
@@ -140,12 +135,10 @@ class PlayHnefatafl:
                 "f1g1", "f5f1", "f9f5", "e6h6",
                 "a6e6", "d5d8", "d1d5", "e4h4", "a4e4"
             ],
-
             'Defender Win (Edge Fort)': [
                 "f1h1", "g5g1", "e2a2", "f5f2", "d1b1", "c5c1", "e1d1", "e3e1", "b5c5", "e4d4",
                 "h5h4", "e1d1", "h4h5", "e5e1", "h5h4", "e6e3", "h4h5", "d4d2", "h5h4", "d5d3"
             ],
-
             'Attacker Loss (Repetition)': [
                 "a4a3", "d5d6", "a3a4", "d6d5", "a4a3", "d5d6", "a3a4", "d6d5", "a4a3", "d5d6", "a3a4", "d6d5"
             ],

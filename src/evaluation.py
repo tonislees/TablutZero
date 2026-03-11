@@ -48,12 +48,12 @@ class Evaluator:
         num_opponents = min(4, len(self.eval_pool))
         opponents = self._load_random_opponents(num_opponents)
 
-        if not opponents:
-            print("  Skipping evaluation — eval pool empty.")
+        if not opponents or num_opponents < 4:
+            print("    Skipping evaluation — not enough opponents.")
             self._add_to_eval_pool(iteration)
             return self.last_elo
 
-        games_per_opponent = (self.cfg.train.batch_size // 4) // num_opponents
+        games_per_opponent = self.cfg.train.batch_size // num_opponents
 
         self.model.eval()
 

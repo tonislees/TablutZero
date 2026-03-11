@@ -1,9 +1,9 @@
 import jax.numpy as jnp
 from flax import nnx
 
-BOARD_EDGE = 11
-PLANES = 40
+BOARD_EDGE = 9
 OBS_PLANES = 43
+PLANES = 4 * (BOARD_EDGE - 1)
 
 
 class ConvBlock(nnx.Module):

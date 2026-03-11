@@ -5,69 +5,61 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array, lax
 
-BOARD_EDGE = 11
-BOARD_SIZE = BOARD_EDGE * BOARD_EDGE # 121
-THRONE = BOARD_SIZE // 2 # 60
+BOARD_EDGE = 9
+BOARD_SIZE = BOARD_EDGE * BOARD_EDGE # 81
+THRONE = BOARD_SIZE // 2 # 40
 MAX_SHIELD_WALL_PARTNERS = BOARD_EDGE - 4
 
 ACTION_PLANES = 4 * (BOARD_EDGE - 1)
 
 EMPTY, TAFLMAN, KING = tuple(range(3))
 NUM_ATTACKERS = (BOARD_EDGE - 5) * 4
-MAX_TERMINATION_STEPS = 512
-MAX_HALF_MOVE_COUNT: float = 100.0
+MAX_TERMINATION_STEPS = 256
+MAX_HALF_MOVE_COUNT: float = 50.0
 
 INIT_BOARD = jnp.int32([
-    0,  0,  0, -1, -1, -1, -1, -1,  0,  0,  0,
-    0,  0,  0,  0,  0, -1,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-   -1,  0,  0,  0,  0,  1,  0,  0,  0,  0, -1,
-   -1,  0,  0,  0,  1,  1,  1,  0,  0,  0, -1,
-   -1, -1,  0,  1,  1,  2,  1,  1,  0, -1, -1,
-   -1,  0,  0,  0,  1,  1,  1,  0,  0,  0, -1,
-   -1,  0,  0,  0,  0,  1,  0,  0,  0,  0, -1,
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0, -1,  0,  0,  0,  0,  0,
-    0,  0,  0, -1, -1, -1, -1, -1,  0,  0,  0,
+    0,  0,  0, -1, -1, -1,  0,  0,  0,
+    0,  0,  0,  0, -1,  0,  0,  0,  0,
+    0,  0,  0,  0,  1,  0,  0,  0,  0,
+   -1,  0,  0,  0,  1,  0,  0,  0, -1,
+   -1, -1,  1,  1,  2,  1,  1, -1, -1,
+   -1,  0,  0,  0,  1,  0,  0,  0, -1,
+    0,  0,  0,  0,  1,  0,  0,  0,  0,
+    0,  0,  0,  0, -1,  0,  0,  0,  0,
+    0,  0,  0, -1, -1, -1,  0,  0,  0,
 ])
 
 ZERO_INIT_ACTION_MASK = jnp.zeros(BOARD_SIZE * ACTION_PLANES, dtype=jnp.bool_)
 
-# 11 110 111 112 113 114 115 116 117 118 119 120
-# 10  99 100 101 102 103 104 105 106 107 108 109
-#  9  88  89  90  91  92  93  94  95  96  97  98
-#  8  77  78  79  80  81  82  83  84  85  86  87
-#  7  66  67  68  69  70  71  72  73  74  75  76
-#  6  55  56  57  58  59  60  61  62  63  64  65
-#  5  44  45  46  47  48  49  50  51  52  53  54
-#  4  33  34  35  36  37  38  39  40  41  42  43
-#  3  22  23  24  25  26  27  28  29  30  31  32
-#  2  11  12  13  14  15  16  17  18  19  20  21
-#  1   0   1   2   3   4   5   6   7   8   9  10
-#      a   b   c   d   e   f   g   h   i   j   k
+#  9  72  73  74  75  76  77  78  79  80
+#  8  63  64  65  66  67  68  69  70  71
+#  7  54  55  56  57  58  59  60  61  62
+#  6  45  46  47  48  49  50  51  52  53
+#  5  36  37  38  39  40  41  42  43  44
+#  4  27  28  29  30  31  32  33  34  35
+#  3  18  19  20  21  22  23  24  25  26
+#  2   9  10  11  12  13  14  15  16  17
+#  1   0   1   2   3   4   5   6   7   8
+#      a   b   c   d   e   f   g   h   i
 
-# Action: AlphaZero style labels (BOARD_SIZE x ACTION_PLANES = 4840)
-#                                 19
-#                                 18
-#                                 17
-#                                 16
-#                                 15
-#                                 14
-#                                 13
-#                                 12
-#                                 11
-#                                 10
-#   39 38 37 36 35 34 33 32 31 30  X  0  1  2  3  4  5  6  7  8  9
-#                                 20
-#                                 21
-#                                 22
-#                                 23
-#                                 24
-#                                 25
-#                                 26
-#                                 27
-#                                 28
-#                                 29
+# Action: AlphaZero style labels (BOARD_SIZE x ACTION_PLANES = 81 x 32 = 2592)
+#                             15
+#                             14
+#                             13
+#                             12
+#                             11
+#                             10
+#                              9
+#                              8
+#  31 30 29 28 27 26 25 24  X  0  1  2  3  4  5  6  7
+#                             16
+#                             17
+#                             18
+#                             19
+#                             20
+#                             21
+#                             22
+#                             23
 
 
 def calc_hostile_squares():
@@ -430,7 +422,17 @@ class Game:
         edge_fort = _check_edge_fort(state)
         defender_won = king_on_corner | edge_fort
 
+        repetition = (state.hash_history == _zobrist_hash(state)).all(axis=1).sum() - 1
+        rep_loss = repetition >= 2
+        attacker_won |= rep_loss & (state.color == -1)
+        defender_won |= rep_loss & (state.color == 1)
+
+        no_moves = ~state.legal_action_mask.any()
+        attacker_won |= no_moves & (state.color == 1)
+        defender_won |= no_moves & (state.color == -1)
+
         draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        draw = draw & (~attacker_won) & (~defender_won)
 
         terminated = attacker_won | defender_won | draw
 

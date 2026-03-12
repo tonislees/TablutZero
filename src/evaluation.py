@@ -49,8 +49,8 @@ class Evaluator:
         opponents = self._load_random_opponents(num_opponents)
         eval_sims = self.cfg.mcts.simulations // 2
 
-        if not opponents or num_opponents < 4:
-            print("    Skipping evaluation — not enough opponents.")
+        if not opponents:
+            print("    Skipping evaluation — eval pool empty.")
             self._add_to_eval_pool(iteration)
             return self.last_elo
 
@@ -205,11 +205,8 @@ class Evaluator:
         weaker_side = "Attacker" if att_winrate < def_winrate else "Defender"
         gap = abs(att_winrate - def_winrate)
 
-        print(f"\n  Attacker win rate: {att_winrate:.1%}   Defender win rate: {def_winrate:.1%}", end="")
-        if gap > 0.15:
-            print(f"   ⚠ {weaker_side} head lagging ({gap:.1%} gap)")
-        else:
-            print()
+        print(f"\n  Attacker win rate: {att_winrate:.1%}   Defender win rate: {def_winrate:.1%}")
+        print()
 
     def _generate_minimal_pgn(self, match_data):
         with open(self.dirs['pgn'], "a") as f:
@@ -312,18 +309,14 @@ x
         self.checkpointer.wait_until_finished()
 
     def _load_random_opponents(self, n: int) -> dict:
-        """Load n opponents: always include iter_0 and most recent, fill rest randomly."""
+        """Load n opponents: always include two of the most recent, fill rest randomly."""
         pool_names = list(self.eval_pool.keys())
         if not pool_names:
             return {}
 
         sorted_names = sorted(pool_names, key=lambda x: int(x.split('_')[1]))
 
-        anchors = []
-        if 'iter_0' in pool_names:
-            anchors.append('iter_0')
-        if sorted_names[-1] not in anchors:
-            anchors.append(sorted_names[-1])
+        anchors = sorted_names[-2:]
 
         remaining = [name for name in pool_names if name not in anchors]
         random_picks = random.sample(remaining, min(n - len(anchors), len(remaining)))

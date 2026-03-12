@@ -17,7 +17,7 @@ from src.evaluation import Evaluator
 from src.hnefatafl.hnefatafl import Hnefatafl
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
-from src.self_play import self_play
+from src.self_play import self_play, set_pbar
 from src.utils import dir_safe, add_to_buffer_cpu, train_step
 
 
@@ -124,12 +124,12 @@ class Coach:
 
     def _maybe_reduce_lr(self):
         history = self.metrics_tracker.metrics_history['total_loss']
-        if len(history) < 10:
+        if len(history) < 20:
             return
-        recent = sum(history[-5:]) / 5
-        previous = sum(history[-10:-5]) / 5
+        recent = sum(history[-10:]) / 10
+        previous = sum(history[-20:-10]) / 10
         improvement = (previous - recent) / previous
-        if improvement < 0.01:
+        if improvement < 0.005:
             self.current_lr = max(self.current_lr * 0.5, 1e-5)
             self.optimizer = nnx.Optimizer(
                 self.model,
@@ -139,7 +139,7 @@ class Coach:
                 ),
                 wrt=nnx.Param
             )
-            print(f"  LR reduced to {self.current_lr}")
+            print(f"\n    LR reduced to {self.current_lr}")
 
     def _load_model(self, model_dir: Path, load_checkpoint: bool) -> HnefataflZeroNet:
         model = HnefataflZeroNet(
@@ -212,9 +212,9 @@ class Coach:
 
         rng_key = self.rngs.split()
 
-        global _self_play_pbar
-        _self_play_pbar = tqdm(total=steps, desc="Self-Play", mininterval=self.cfg.train.tqdm_interval,
+        pbar = tqdm(total=steps, desc="Self-Play", mininterval=self.cfg.train.tqdm_interval,
                                ncols=100, unit='steps')
+        set_pbar(pbar)
 
         self.env_state, final_transitions, terminals, rewards = self_play(
             model=self.model,
@@ -229,9 +229,8 @@ class Coach:
             attacker_explore=self.cfg.train.attacker_explore
         )
 
-        _self_play_pbar.close()
-        if '_self_play_pbar' in globals():
-            del globals()['_self_play_pbar']
+        pbar.close()
+        set_pbar(None)
 
         self._process_results(terminals, rewards)
         final_transitions_cpu = jax.device_get(final_transitions)

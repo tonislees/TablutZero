@@ -7,6 +7,11 @@ from jax import numpy as jnp
 from src.mcts import run_mcts
 from src.utils import policy_value_by_player
 
+_self_play_pbar = None
+
+def set_pbar(pbar):
+    global _self_play_pbar
+    _self_play_pbar = pbar
 
 @partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env', 'attacker_explore'))
 def self_play(model, env_state, rng_key, num_steps, num_simulations,

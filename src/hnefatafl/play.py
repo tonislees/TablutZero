@@ -268,5 +268,5 @@ class PlayHnefatafl:
 
 
 if __name__ == '__main__':
-    game = PlayHnefatafl(ai_color=1)
+    game = PlayHnefatafl(ai_color=-1)
     game.play_ui()

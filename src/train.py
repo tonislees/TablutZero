@@ -240,31 +240,24 @@ class Coach:
         total_terminated = int(terminals.sum())
         attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
         defender_wins = int((terminals & (attacker_rewards == -1)).sum())
-        total_draws = int((terminals & (attacker_rewards == 0)).sum())
 
         if total_terminated > 0:
             a_win_rate = attacker_wins / total_terminated
             d_win_rate = defender_wins / total_terminated
-            draw_rate = total_draws / total_terminated
         else:
-            a_win_rate = d_win_rate = draw_rate = 0.0
+            a_win_rate = d_win_rate = 0.0
 
-        rates = (a_win_rate, d_win_rate, draw_rate)
-        names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
-        # past_5_avg = [] # [Attacker avg, defender avg, draw avg]
+        rates = (a_win_rate, d_win_rate)
+        names = ('attacker_win_rate', 'defender_win_rate')
+        # past_5_avg = [] # [Attacker avg, defender avg]
 
         for rate, name in zip(rates, names):
             history = self.metrics_tracker.metrics_history[name]
             history.append(rate)
             last_5 = history[-5:]
-            # past_5_avg.append(sum(last_5) / len(last_5))
-
-        # self.reward_consts = calculate_dynamic_rewards(past_5_avg[0], past_5_avg[1])
 
         print(f">>> Self-play games finished: {total_terminated}")
-        print(
-            f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
-        # print(f"    Attacker reward: {self.reward_consts[0]} | Defender reward: {self.reward_consts[2]}")
+        print(f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%}")
 
     def _run_training_loop(self):
         self.model.train()

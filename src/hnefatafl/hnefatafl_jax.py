@@ -8,7 +8,6 @@ from jax import Array, lax
 BOARD_EDGE = 9
 BOARD_SIZE = BOARD_EDGE * BOARD_EDGE # 81
 THRONE = BOARD_SIZE // 2 # 40
-MAX_SHIELD_WALL_PARTNERS = BOARD_EDGE - 4
 
 ACTION_PLANES = 4 * (BOARD_EDGE - 1)
 
@@ -118,25 +117,10 @@ def calc_edges():
     inner_neighbor[left] = left + 1
     inner_neighbor[right] = right - 1
 
-    shield_wall_partners = -np.ones((BOARD_SIZE, MAX_SHIELD_WALL_PARTNERS), dtype=np.int32)
-
-    for edge in [top, right, bottom, left]:
-        for current_sq in edge:
-            if HOSTILE_SQUARES_MASK[current_sq]:
-                continue
-            valid_p = []
-            current_idx = np.where(edge == current_sq)[0][0]
-            for other_sq in edge:
-                other_idx = np.where(edge == other_sq)[0][0]
-                dist = abs(current_idx - other_idx)
-                if dist >= 3:
-                    valid_p.append(other_sq)
-            shield_wall_partners[current_sq, :len(valid_p)] = valid_p
-
-    return edges, inner_neighbor, shield_wall_partners
+    return edges, inner_neighbor
 
 
-EDGES, INNER_NEIGHBOR, SHIELD_WALL_PARTNERS = calc_edges()
+EDGES, INNER_NEIGHBOR = calc_edges()
 
 
 def calc_action_arrays():
@@ -256,11 +240,11 @@ BETWEEN = calc_between_squares()
 
 (FROM_PLANE, TO_PLANE, LEGAL_DEST,
  BETWEEN, EDGES, ATTACK_PAIR, NEIGHBORS, INNER_NEIGHBOR,
- SHIELD_WALL_PARTNERS, HOSTILE_SQUARES_MASK, ROWS, COLUMNS) = (
+ HOSTILE_SQUARES_MASK, ROWS, COLUMNS) = (
     jnp.array(x) for x in
     (FROM_PLANE, TO_PLANE, LEGAL_DEST,
      BETWEEN, EDGES, ATTACK_PAIR, NEIGHBORS, INNER_NEIGHBOR,
-     SHIELD_WALL_PARTNERS, HOSTILE_SQUARES_MASK, ROWS, COLUMNS))
+     HOSTILE_SQUARES_MASK, ROWS, COLUMNS))
 
 keys = jax.random.split(jax.random.PRNGKey(12345), 4)
 ZOBRIST_BOARD = jax.random.randint(keys[0], shape=(BOARD_SIZE, 5, 2), minval=0, maxval=2 ** 31 - 1, dtype=jnp.uint32)
@@ -403,7 +387,7 @@ class Game:
         repetition = (state.hash_history == _zobrist_hash(state)).all(axis=1).sum() - 1
         terminated |= repetition >= 2
 
-        # Draw conditions
+        # Move count conditions
         terminated |= state.half_move_count >= MAX_HALF_MOVE_COUNT
         terminated |= MAX_TERMINATION_STEPS <= state.step_count
 
@@ -416,8 +400,7 @@ class Game:
 
         king_pos_mask = jnp.abs(state.board) == 2
         king_on_corner = (king_pos_mask & CORNERS_MASK).any()
-        edge_fort = _check_edge_fort(state)
-        defender_won = king_on_corner | edge_fort
+        defender_won = king_on_corner
 
         repetition = (state.hash_history == _zobrist_hash(state)).all(axis=1).sum() - 1
         rep_loss = repetition >= 2
@@ -428,13 +411,15 @@ class Game:
         attacker_won |= no_moves & (state.color == 1)
         defender_won |= no_moves & (state.color == -1)
 
-        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
-        draw = draw & (~attacker_won) & (~defender_won)
+        no_win = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        no_win &= (~attacker_won) & (~defender_won)
 
-        terminated = attacker_won | defender_won | draw
+        defender_won |= no_win
 
-        attacker_score = jnp.where(attacker_won, 1.0, jnp.where(defender_won, -1.0, 0.0))
-        defender_score = jnp.where(defender_won, 1.0, jnp.where(attacker_won, -1.0, 0.0))
+        terminated = attacker_won | defender_won
+
+        attacker_score = jnp.where(attacker_won, 1.0, -1.0)
+        defender_score = jnp.where(defender_won, 1.0, -1.0)
 
         return terminated, jnp.array([attacker_score, defender_score], dtype=jnp.float32)
 
@@ -445,21 +430,20 @@ class Game:
 
         # Defenders win
         king_on_corner = ((jnp.abs(state.board) == KING) & CORNERS_MASK).any()
-        fort = _check_edge_fort(state)
 
         # Loss
         repetition = (state.hash_history == _zobrist_hash(state)).all(axis=1).sum() - 1
         rep_loss = repetition >= 2
         no_moves = ~state.legal_action_mask.any()
 
-        # Technical Draws
-        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        # Move count condition
+        no_win = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
 
         attacker_score = jnp.float32(0.0)
         defender_score = jnp.float32(0.0)
 
         attacker_won = king_captured
-        defender_won = king_on_corner | fort
+        defender_won = king_on_corner
 
         attacker_won |= rep_loss & (state.color == -1)
         defender_won |= rep_loss & (state.color == 1)
@@ -473,179 +457,15 @@ class Game:
         defender_score = lax.select(defender_won, 1.0, defender_score)
         attacker_score = lax.select(defender_won, -1.0, attacker_score)
 
-        is_draw = draw & (~attacker_won) & (~defender_won)
-        attacker_score = lax.select(is_draw, 0.0, attacker_score)
-        defender_score = lax.select(is_draw, 0.0, defender_score)
+        no_win &= (~attacker_won) & (~defender_won)
+        attacker_score = lax.select(no_win, -1.0, attacker_score)
+        defender_score = lax.select(no_win, 1.0, defender_score)
 
         return jnp.array([attacker_score, defender_score])
 
 
 def _check_king_captured(state: GameState):
     return ~jnp.any(jnp.abs(state.board) == KING)
-
-
-def _shift_up(grid):
-    return jnp.concatenate([grid[1:], jnp.zeros((1, BOARD_EDGE), dtype=bool)], axis=0)
-
-
-def _shift_down(grid):
-    return jnp.concatenate([jnp.zeros((1, BOARD_EDGE), dtype=bool), grid[:-1]], axis=0)
-
-
-def _shift_left(grid):
-    return jnp.concatenate([grid[:, 1:], jnp.zeros((BOARD_EDGE, 1), dtype=bool)], axis=1)
-
-
-def _shift_right(grid):
-    return jnp.concatenate([jnp.zeros((BOARD_EDGE, 1), dtype=bool), grid[:, :-1]], axis=1)
-
-
-def _flood_fill(start_mask: Array, valid_mask: Array, max_iterations: int = 30) -> Array:
-    """Expands a boolean mask into adjacent squares defined by valid_mask."""
-
-    def cond_fn(val):
-        i, prev_mask, curr_mask = val
-        return (i < max_iterations) & jnp.any(prev_mask != curr_mask)
-
-    def body_fn(val):
-        i, _, current_mask = val
-        grid = current_mask.reshape((BOARD_EDGE, BOARD_EDGE))
-        neighbors = _shift_up(grid) | _shift_down(grid) | _shift_left(grid) | _shift_right(grid)
-        next_mask = current_mask | (neighbors.flatten() & valid_mask)
-        return i + 1, current_mask, next_mask
-
-    # Start loop: index 0, previous mask (empty), current mask (start)
-    _, _, final_mask = lax.while_loop(
-        cond_fn,
-        body_fn,
-        (0, jnp.zeros_like(start_mask), start_mask)
-    )
-    return final_mask
-
-
-def _check_edge_fort(state: GameState):
-    """Check if the King has formed an unbreakable 'Exit Fort' on the edge."""
-
-    def _check():
-        king_pos_mask = (state.board == -KING)
-        king_on_edge = (king_pos_mask & EDGES).any()
-        def _do_flood_fill(_):
-            empty_mask = (state.board == 0)
-            defender_mask = (state.board == -TAFLMAN)
-            attacker_mask = (state.board == TAFLMAN)
-
-            flood = _flood_fill(start_mask=king_pos_mask, valid_mask=empty_mask)
-
-            # Identify the wall
-            flood_grid = flood.reshape(BOARD_EDGE, BOARD_EDGE)
-            flood_neighbors = (_shift_up(flood_grid) | _shift_down(flood_grid) |
-                               _shift_left(flood_grid) | _shift_right(flood_grid)).flatten()
-
-            # The Wall consists of Defenders that touch the King's flood
-            wall_mask = flood_neighbors & defender_mask
-
-            has_room = jnp.sum(flood) > 1
-            exposed_to_attacker = (flood_neighbors & attacker_mask).any()
-
-            empty_grid = empty_mask.reshape(BOARD_EDGE, BOARD_EDGE)
-            attacker_grid = attacker_mask.reshape(BOARD_EDGE, BOARD_EDGE)
-            wall_grid = wall_mask.reshape(BOARD_EDGE, BOARD_EDGE)
-
-            threat_grid = (empty_grid & ~flood_grid) | attacker_grid
-            vertical_threats = _shift_down(threat_grid) & _shift_up(threat_grid)
-            horizontal_threats = _shift_right(threat_grid) & _shift_left(threat_grid)
-
-            wall_broken = (wall_grid & (vertical_threats | horizontal_threats)).any()
-            return has_room & (~exposed_to_attacker) & (~wall_broken)
-        return lax.cond(king_on_edge, _do_flood_fill, lambda _: False, operand=None)
-
-    return lax.cond(
-        state.color == -1,
-        lambda _: _check(),
-        lambda _: False,
-        operand=None
-    )
-
-
-def _check_encirclement(state: GameState):
-    """Checks if the Defenders are completely cut off from the board edge.
-    This check runs when it is the DEFENDER'S turn (after Attackers moved)."""
-
-    def compute_encirclement(_):
-        # Perspective: Defender's Turn (color == 1)
-        # King = 2, Defender = 1, Empty = 0, Attacker = -1
-
-        king_pos_mask = (state.board > 0)
-        defenders_mask = (state.board >= 0)
-
-        flood = _flood_fill(start_mask=king_pos_mask, valid_mask=defenders_mask)
-
-        # Check if the flood touched the edge
-        escaped = (flood & EDGES).any()
-        return ~escaped
-
-    return lax.cond(
-        state.color == 1,
-        compute_encirclement,
-        lambda _: False,
-        operand=None
-    )
-
-
-def _check_shield_wall(state: GameState, to_sq):
-    king_val = KING * state.color
-    king_pos_arr = jnp.where(state.board == king_val, size=1, fill_value=-1)[0]
-    king_pos = king_pos_arr[0]
-    is_edge_move = EDGES[to_sq]
-
-    def check_partners():
-        candidates = SHIELD_WALL_PARTNERS[to_sq]
-
-        def check_one_partner(partner_sq):
-            partner_piece = state.board[partner_sq]
-
-            is_valid_candidate = (partner_sq != -1)
-            is_partner_friendly = (partner_piece > 0)
-            is_partner_corner = HOSTILE_SQUARES_MASK[jnp.maximum(partner_sq, 0)]
-
-            is_valid_partner = is_valid_candidate & (is_partner_friendly | is_partner_corner)
-
-            between_sqs = BETWEEN[to_sq, partner_sq]
-            path_mask = (between_sqs != -1)
-
-            victim_pieces = jnp.take(state.board, between_sqs, mode='fill', fill_value=0)
-            inner_sqs = jnp.take(INNER_NEIGHBOR, between_sqs, mode='fill', fill_value=0)
-            inner_pieces = jnp.take(state.board, inner_sqs, mode='fill', fill_value=0)
-
-            # Check for enemies between partners
-            is_enemy = (victim_pieces < 0)
-
-            # Check if the shield wall covers enemies
-            is_wall_intact = (inner_pieces > 0)
-            path_valid = jnp.all(jnp.where(path_mask, is_enemy & is_wall_intact, True))
-            do_capture = is_valid_partner & path_valid
-
-            return jnp.where(do_capture, between_sqs, -1)
-
-        captured_batch = jax.vmap(check_one_partner)(candidates)
-        return captured_batch.flatten()
-
-    captured_indices = lax.cond(
-        is_edge_move,
-        lambda _: check_partners(),
-        lambda _: -jnp.ones(MAX_SHIELD_WALL_PARTNERS * (BOARD_EDGE - 2), dtype=jnp.int32),
-        operand=None
-    )
-
-    update_mask = (captured_indices != -1)
-    safe_indices = jnp.where(update_mask, captured_indices, 0)
-    new_values = jnp.where(update_mask, EMPTY, state.board[safe_indices])
-
-    new_board = state.board.at[safe_indices].set(new_values)
-    # Ensure king is preserved at its current position (which might have changed if it moved)
-    new_board = jnp.where(king_pos != -1, new_board.at[king_pos].set(king_val), new_board)
-
-    return state._replace(board=new_board)
 
 
 def _flip(state: GameState):
@@ -690,9 +510,6 @@ def _apply_move(state: GameState, action: Action):
     # Check for captures
     pieces_before = jnp.count_nonzero(state.board)
     state = _check_captures(state, action.to_sq)
-
-    # Check for shield wall
-    state = _check_shield_wall(state, action.to_sq)
 
     pieces_after = jnp.count_nonzero(state.board)
     is_capture = pieces_after < pieces_before

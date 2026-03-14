@@ -124,35 +124,32 @@ class Evaluator:
                           opponent: str, current_model: str):
         match_data = []
 
-        p0_stats = {"wins": 0, "losses": 0, "draws": 0}
-        p1_stats = {"wins": 0, "losses": 0, "draws": 0}
+        p0_stats = {"wins": 0, "losses": 0}
+        p1_stats = {"wins": 0, "losses": 0}
 
         for i in range(len(rewards_p0)):
             rew = rewards_p0[i, 0]
             match_data.append((current_model, opponent, rew))
             if rew == 1:    p0_stats["wins"] += 1
             elif rew == -1: p0_stats["losses"] += 1
-            else:           p0_stats["draws"] += 1
 
         for i in range(len(rewards_p1)):
             rew = rewards_p1[i, 0]
             match_data.append((opponent, current_model, -rew))
             if rew == 1:    p1_stats["wins"] += 1
             elif rew == -1: p1_stats["losses"] += 1
-            else:           p1_stats["draws"] += 1
 
         total_games = len(rewards_p0) + len(rewards_p1)
         total_wins = p0_stats["wins"] + p1_stats["wins"]
         total_losses = p0_stats["losses"] + p1_stats["losses"]
-        total_draws = p0_stats["draws"] + p1_stats["draws"]
-        score = (total_wins + 0.5 * total_draws) / total_games if total_games > 0 else 0.0
+        score = total_wins / total_games if total_games > 0 else 0.0
 
         summary = {
             "opponent": opponent,
             "p0": p0_stats,   # current model as attacker
             "p1": p1_stats,   # current model as defender
             "total": {"wins": total_wins, "losses": total_losses,
-                      "draws": total_draws, "games": total_games},
+                      "games": total_games},
             "score": score,
         }
 
@@ -160,9 +157,9 @@ class Evaluator:
 
     @staticmethod
     def _log_eval_results(current_model: str, summaries: list[dict]):
-        total_wins = total_losses = total_draws = total_games = 0
-        att_wins = att_losses = att_draws = 0
-        def_wins = def_losses = def_draws = 0
+        total_wins = total_losses = total_games = 0
+        att_wins = att_losses = 0
+        def_wins = def_losses = 0
 
         print(f"\n{'  ═' * 17}")
         print(f"  Evaluation: {current_model}")
@@ -174,31 +171,30 @@ class Evaluator:
             p0, p1 = s['p0'], s['p1']
             opp_short = s['opponent'][-14:] if len(s['opponent']) > 14 else s['opponent']
 
-            att_str = f"{p0['wins']}W {p0['losses']}L {p0['draws']}D"
-            def_str = f"{p1['wins']}W {p1['losses']}L {p1['draws']}D"
+            att_str = f"{p0['wins']}W {p0['losses']}L"
+            def_str = f"{p1['wins']}W {p1['losses']}L"
             score_str = f"{s['score']:.1%}"
 
             print(f"  {opp_short:<18} {att_str:^22} {def_str:^22} {score_str:>6}")
 
             total_wins   += s['total']['wins']
             total_losses += s['total']['losses']
-            total_draws  += s['total']['draws']
             total_games  += s['total']['games']
 
-            att_wins   += p0['wins'];   att_losses += p0['losses'];   att_draws += p0['draws']
-            def_wins   += p1['wins'];   def_losses += p1['losses'];   def_draws += p1['draws']
+            att_wins   += p0['wins'];   att_losses += p0['losses']
+            def_wins   += p1['wins'];   def_losses += p1['losses']
 
-        overall_score = (total_wins + 0.5 * total_draws) / total_games if total_games > 0 else 0.0
+        overall_score = total_wins / total_games if total_games > 0 else 0.0
 
         print(f"  {'─' * 72}")
         print(f"  {'TOTAL':<18} "
-              f"{f'{att_wins}W {att_losses}L {att_draws}D':^22} "
-              f"{f'{def_wins}W {def_losses}L {def_draws}D':^22} "
+              f"{f'{att_wins}W {att_losses}L':^22} "
+              f"{f'{def_wins}W {def_losses}L':^22} "
               f"{overall_score:>6.1%}")
 
         # Attacker/Defender balance insight
-        att_total = att_wins + att_losses + att_draws
-        def_total = def_wins + def_losses + def_draws
+        att_total = att_wins + att_losses
+        def_total = def_wins + def_losses
         att_winrate = att_wins / att_total if att_total > 0 else 0.0
         def_winrate = def_wins / def_total if def_total > 0 else 0.0
 

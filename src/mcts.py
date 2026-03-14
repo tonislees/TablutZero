@@ -18,12 +18,12 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
     is_term, raw_rewards = jax.vmap(env.game.mcts_status)(next_game_state)
 
-    r_a_win, r_a_loss, r_d_win, r_d_loss, r_draw_att, r_draw_def = reward_consts
-
+    r_a_win, r_a_loss, r_d_win, r_d_loss = reward_consts
     att_raw = raw_rewards[:, 0]
     def_raw = raw_rewards[:, 1]
-    scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, r_draw_att))
-    scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, r_draw_def))
+
+    scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, 0.0))
+    scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, 0.0))
     scaled_rewards = jnp.stack([scaled_att, scaled_def], axis=1)
 
     next_state = embedding.replace(
@@ -54,7 +54,7 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
 def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
              batch_size: int, dirichlet_fraction, attacker_explore: bool = True,
-             reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0, -1.0, 1.0])):
+             reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0])):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 

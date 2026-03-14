@@ -75,7 +75,7 @@ class Coach:
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
         self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
-        self.reward_consts = [1.0, -1.0, 1.0, -1.0, 0.0, 0.0] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_drw_r]
+        self.reward_consts = [1, -1, 1, -1] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r]
 
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
@@ -174,15 +174,10 @@ class Coach:
     def train(self):
         eval_interval = self.cfg.train.eval_interval
         eval_start = self.cfg.train.eval_start
-        draw_penalty_start = self.cfg.train.draw_penalty_start
         for i in range(self.cfg.train.iterations):
             start_time = time.time()
             iteration = i + self.last_iteration + 1
             print(f"--- Iteration {iteration} ---")
-
-            if iteration == draw_penalty_start:
-                self.reward_consts[4] = -1.0
-                self.reward_consts[5] = 1.0
 
             self._run_self_play_loop()
             self._run_training_loop()
@@ -245,25 +240,24 @@ class Coach:
         total_terminated = int(terminals.sum())
         attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
         defender_wins = int((terminals & (attacker_rewards == -1)).sum())
-        total_draws = int((terminals & (attacker_rewards == 0)).sum())
 
         if total_terminated > 0:
             a_win_rate = attacker_wins / total_terminated
             d_win_rate = defender_wins / total_terminated
-            draw_rate = total_draws / total_terminated
         else:
-            a_win_rate = d_win_rate = draw_rate = 0.0
+            a_win_rate = d_win_rate = 0.0
 
-        rates = (a_win_rate, d_win_rate, draw_rate)
-        names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
+        rates = (a_win_rate, d_win_rate)
+        names = ('attacker_win_rate', 'defender_win_rate')
+        # past_5_avg = [] # [Attacker avg, defender avg]
 
         for rate, name in zip(rates, names):
             history = self.metrics_tracker.metrics_history[name]
             history.append(rate)
+            last_5 = history[-5:]
 
         print(f">>> Self-play games finished: {total_terminated}")
-        print(
-            f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
+        print(f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%}")
 
     def _run_training_loop(self):
         self.model.train()

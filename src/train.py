@@ -57,9 +57,9 @@ class Coach:
         state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
         self.model = nnx.merge(graph_def, state)
         self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
-        opt_graph_def, opt_state = nnx.split(self.optimizer)
-        opt_state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), opt_state)
-        self.optimizer = nnx.merge(opt_graph_def, opt_state)
+        # opt_graph_def, opt_state = nnx.split(self.optimizer)
+        # opt_state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), opt_state)
+        # self.optimizer = nnx.merge(opt_graph_def, opt_state)
 
         # Environment
         self.env = Hnefatafl()

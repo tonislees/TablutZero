@@ -75,7 +75,7 @@ class Coach:
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
         self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
-        self.reward_consts = [1, -1, 1, -1] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
+        self.reward_consts = [1, -1, 1, -1, 1, -1] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
 
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
@@ -251,20 +251,20 @@ class Coach:
 
         rates = (a_win_rate, d_win_rate, draw_rate)
         names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
-        past_5_avg = [] # [Attacker avg, defender avg, draw avg]
+        # past_5_avg = [] # [Attacker avg, defender avg, draw avg]
 
         for rate, name in zip(rates, names):
             history = self.metrics_tracker.metrics_history[name]
             history.append(rate)
-            last_5 = history[-5:]
-            past_5_avg.append(sum(last_5) / len(last_5))
+            # last_5 = history[-5:]
+            # past_5_avg.append(sum(last_5) / len(last_5))
 
-        self.reward_consts = calculate_dynamic_rewards(past_5_avg[0], past_5_avg[1])
+        # self.reward_consts = calculate_dynamic_rewards(past_5_avg[0], past_5_avg[1])
 
         print(f">>> Self-play games finished: {total_terminated}")
         print(
             f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
-        print(f"    Attacker reward: {self.reward_consts[0]} | Defender reward: {self.reward_consts[2]}")
+        # print(f"    Attacker reward: {self.reward_consts[0]} | Defender reward: {self.reward_consts[2]}")
 
     def _run_training_loop(self):
         self.model.train()

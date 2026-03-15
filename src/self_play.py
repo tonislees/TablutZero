@@ -37,14 +37,14 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations,
 
         auto_reset_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
 
-        r_a_win, r_a_loss, r_d_win, r_d_loss = reward_consts
+        r_a_win, r_a_loss, r_d_win, r_d_loss, r_a_draw, r_d_draw = reward_consts
 
         internal_rewards = jax.vmap(env.game.rewards)(next_env_state._x)
         att_raw = internal_rewards[:, 0]
         def_raw = internal_rewards[:, 1]
 
-        scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, 0.0))
-        scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, 0.0))
+        scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, r_a_draw))
+        scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, r_d_draw))
         scaled_internal_rewards = jnp.stack([scaled_att, scaled_def], axis=1)
 
         scaled_player_rewards = jax.vmap(lambda r, order: r[order])(

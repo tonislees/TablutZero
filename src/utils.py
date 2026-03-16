@@ -50,7 +50,7 @@ def add_to_buffer_cpu(buffer_state, transitions, buffer):
 def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict):
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, (p_loss, v_loss)), grads = grad_fn(model, batch)
-    optimizer.update(grads)
+    optimizer.update(model, grads)
     return loss, p_loss, v_loss
 
 

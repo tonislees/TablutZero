@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 BOARD_EDGE = 9
-OBS_PLANES = 43
+OBS_PLANES = 42
 PLANES = 4 * (BOARD_EDGE - 1)
 
 

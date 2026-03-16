@@ -15,7 +15,6 @@ ACTION_PLANES = 4 * (BOARD_EDGE - 1)
 EMPTY, TAFLMAN, KING = tuple(range(3))
 NUM_ATTACKERS = (BOARD_EDGE - 5) * 4
 MAX_TERMINATION_STEPS = 256
-MAX_HALF_MOVE_COUNT: float = 50.0
 
 INIT_BOARD = jnp.int32([
     0,  0,  0, -1, -1, -1,  0,  0,  0,
@@ -259,7 +258,6 @@ class GameState(NamedTuple):
     hash_history: Array = jnp.zeros((MAX_TERMINATION_STEPS + 1, 2), dtype=jnp.uint32)
     legal_action_mask: Array = ZERO_INIT_ACTION_MASK
     step_count: Array = jnp.int32(0)
-    half_move_count: Array = jnp.int32(0)
 
 
 class Action(NamedTuple):
@@ -363,8 +361,7 @@ class Game:
             [
                 history_features,
                 color * ones,
-                (state.step_count / MAX_TERMINATION_STEPS) * ones,
-                (state.half_move_count.astype(jnp.float32) / MAX_HALF_MOVE_COUNT) * ones
+                (state.step_count / MAX_TERMINATION_STEPS) * ones
             ]
         ).transpose((1, 2, 0))
 
@@ -388,8 +385,7 @@ class Game:
         repetition = (state.hash_history == _zobrist_hash(state)).all(axis=1).sum() - 1
         terminated |= repetition >= 2
 
-        # Draw conditions
-        terminated |= state.half_move_count >= MAX_HALF_MOVE_COUNT
+        # Draw condition
         terminated |= MAX_TERMINATION_STEPS <= state.step_count
 
         return terminated
@@ -412,7 +408,7 @@ class Game:
         attacker_won |= no_moves & (state.color == 1)
         defender_won |= no_moves & (state.color == -1)
 
-        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        draw = state.step_count >= MAX_TERMINATION_STEPS
         draw = draw & (~attacker_won) & (~defender_won)
 
         terminated = attacker_won | defender_won | draw
@@ -436,7 +432,7 @@ class Game:
         no_moves = ~state.legal_action_mask.any()
 
         # Technical Draws
-        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        draw = state.step_count >= MAX_TERMINATION_STEPS
 
         attacker_score = jnp.float32(0.0)
         defender_score = jnp.float32(0.0)
@@ -504,17 +500,7 @@ def _apply_move(state: GameState, action: Action):
     piece = state.board[action.from_sq]
 
     # Move the piece
-    state = state._replace(board=state.board.at[action.from_sq].set(EMPTY).at[action.to_sq].set(piece))
-
-    # Check for captures
-    pieces_before = jnp.count_nonzero(state.board)
-    state = _check_captures(state, action.to_sq)
-
-    pieces_after = jnp.count_nonzero(state.board)
-    is_capture = pieces_after < pieces_before
-    half_move_count = lax.select(is_capture, 0, state.half_move_count + 1)
-
-    return state._replace(half_move_count=half_move_count)
+    return state._replace(board=state.board.at[action.from_sq].set(EMPTY).at[action.to_sq].set(piece))
 
 
 def _update_history(state: GameState):

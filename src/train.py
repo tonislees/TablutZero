@@ -88,7 +88,7 @@ class Coach:
         cpu_device = jax.devices('cpu')[0]
         with jax.default_device(cpu_device):
             example_transition = {
-                "observation": jnp.zeros((9, 9, 43), dtype=jnp.float32),
+                "observation": jnp.zeros((9, 9, 42), dtype=jnp.float32),
                 "policy_target": jnp.zeros((81 * 32,), dtype=jnp.float32),
                 "value_target": jnp.zeros((), dtype=jnp.float32),
                 "legal_action_mask": jnp.zeros((81 * 32,), dtype=jnp.bool_),

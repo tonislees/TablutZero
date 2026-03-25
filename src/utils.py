@@ -6,6 +6,24 @@ import optax
 from flax import nnx
 from jax import numpy as jnp
 
+from src.hnefatafl.hnefatafl_jax import ROTATION_PERM
+
+
+def augment_batch(batch, rng_key):
+    k = jax.random.randint(rng_key, (), 0, 4)
+    obs = jax.lax.switch(k, [
+        lambda x: x,
+        lambda x: jnp.rot90(x, 1, axes=(1, 2)),
+        lambda x: jnp.rot90(x, 2, axes=(1, 2)),
+        lambda x: jnp.rot90(x, 3, axes=(1, 2)),
+    ], batch['observation'])
+    return {
+        **batch,
+        'observation': obs,
+        'policy_target': batch['policy_target'][:, ROTATION_PERM[k]],
+        'legal_action_mask': batch['legal_action_mask'][:, ROTATION_PERM[k]],
+    }
+
 
 def policy_value_by_player(model_outputs: tuple[jax.Array, ...], player: jax.Array) -> tuple[jax.Array, jax.Array]:
     p0_logits, p0_value, p1_logits, p1_value = model_outputs
@@ -53,7 +71,8 @@ def add_to_buffer_cpu(buffer_state, transitions, buffer):
 
 
 @nnx.jit
-def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict):
+def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict, rng_key: jax.Array):
+    batch = augment_batch(batch, rng_key)
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, (p_loss, v_loss, v_acc)), grads = grad_fn(model, batch)
     optimizer.update(model, grads)

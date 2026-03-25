@@ -304,7 +304,8 @@ class Coach:
             loss, p_loss, v_loss, v_acc = train_step(
                 self.model,
                 self.optimizer,
-                training_data
+                training_data,
+                rng_key
             )
 
             self.metrics_tracker.update_step(total_loss=loss, policy_loss=p_loss, value_loss=v_loss, value_acc=v_acc)

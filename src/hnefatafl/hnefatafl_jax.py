@@ -15,7 +15,7 @@ ACTION_PLANES = 4 * (BOARD_EDGE - 1)
 EMPTY, TAFLMAN, KING = tuple(range(3))
 NUM_ATTACKERS = (BOARD_EDGE - 5) * 4
 MAX_TERMINATION_STEPS = 512
-MAX_HALF_MOVE_COUNT: float = 100.0
+MAX_HALF_MOVE_COUNT: float = 200.0
 
 INIT_BOARD = jnp.int32([
     0,  0,  0, -1, -1, -1,  0,  0,  0,
@@ -239,13 +239,36 @@ def calc_between_squares():
 
 BETWEEN = calc_between_squares()
 
+
+DIR_MAP_90 = {0: 2, 1: 0, 2: 3, 3: 1}  # right→down, up→right, down→left, left→up
+
+def _compute_rotation_perms():
+    dist = BOARD_EDGE - 1
+    perms = np.zeros((4, BOARD_SIZE * ACTION_PLANES), dtype=np.int32)
+    perms[0] = np.arange(BOARD_SIZE * ACTION_PLANES)
+    for k in range(1, 4):
+        for old_label in range(BOARD_SIZE * ACTION_PLANES):
+            old_sq, old_plane = old_label // ACTION_PLANES, old_label % ACTION_PLANES
+            r, c = divmod(old_sq, BOARD_EDGE)
+            for _ in range(k):
+                r, c = BOARD_EDGE - 1 - c, r
+            new_sq = r * BOARD_EDGE + c
+            d = old_plane // dist
+            for _ in range(k):
+                d = DIR_MAP_90[d]
+            new_plane = d * dist + old_plane % dist
+            perms[k][new_sq * ACTION_PLANES + new_plane] = old_label
+    return jnp.array(perms)
+
+ROTATION_PERM = _compute_rotation_perms()
+
 (FROM_PLANE, TO_PLANE, LEGAL_DEST,
  BETWEEN, EDGES, ATTACK_PAIR, NEIGHBORS, INNER_NEIGHBOR,
- HOSTILE_SQUARES_MASK, ROWS, COLUMNS) = (
+ HOSTILE_SQUARES_MASK, ROWS, COLUMNS, ROTATION_PERM) = (
     jnp.array(x) for x in
     (FROM_PLANE, TO_PLANE, LEGAL_DEST,
      BETWEEN, EDGES, ATTACK_PAIR, NEIGHBORS, INNER_NEIGHBOR,
-     HOSTILE_SQUARES_MASK, ROWS, COLUMNS))
+     HOSTILE_SQUARES_MASK, ROWS, COLUMNS, ROTATION_PERM))
 
 keys = jax.random.split(jax.random.PRNGKey(12345), 4)
 ZOBRIST_BOARD = jax.random.randint(keys[0], shape=(BOARD_SIZE, 5, 2), minval=0, maxval=2 ** 31 - 1, dtype=jnp.uint32)

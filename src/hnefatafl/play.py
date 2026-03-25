@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import jax
-import optax
 from flax import nnx
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
@@ -22,7 +21,7 @@ class PlayHnefatafl:
         self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
         self.mcts_sims = 256
         root_dir = self.root = Path(__file__).resolve().parents[2]
-        checkpoint_path = root_dir / 'training_data' / 'model' / 'checkpoints'
+        checkpoint_path = root_dir / 'training_data' / 'model'
         self.model = self.load_model(checkpoint_path)
         self.ai_color = ai_color
         self.key_env = jax.random.PRNGKey(self.seed + 1)
@@ -47,24 +46,8 @@ class PlayHnefatafl:
             print(f"Loading checkpoint...")
             checkpointer = ocp.StandardCheckpointer()
             graph_def, abstract_state = nnx.split(model)
-            temp_opt = nnx.Optimizer(
-                model,
-                optax.chain(
-                    optax.clip_by_global_norm(1.0),
-                    optax.adamw(learning_rate=optax.warmup_cosine_decay_schedule(
-                        init_value=1e-4,
-                        peak_value=2e-3,
-                        warmup_steps=500,
-                        decay_steps=100000,
-                        end_value=1e-5
-                    ))
-                ),
-                wrt=nnx.Param
-            )
-            _, abstract_opt_state = nnx.split(temp_opt)
             abstract_checkpoint = {
                 'model': abstract_state,
-                'optimizer': abstract_opt_state,
             }
             restored = checkpointer.restore(checkpoint_path, abstract_checkpoint)
             model = nnx.merge(graph_def, restored['model'])
@@ -214,56 +197,7 @@ class PlayHnefatafl:
         ui = HnefataflUI(self)
         ui.run()
 
-    def test(self):
-        tests = {
-            'Attacker Win (King Capture)': [
-                "f1g1", "f5f1", "f9f5", "e6h6",
-                "a6e6", "d5d8", "d1d5", "e4h4", "a4e4"
-            ],
-            'Defender Win (Edge Fort)': [
-                "f1h1", "g5g1", "e2a2", "f5f2", "d1b1", "c5c1", "e1d1", "e3e1", "b5c5", "e4d4",
-                "h5h4", "e1d1", "h4h5", "e5e1", "h5h4", "e6e3", "h4h5", "d4d2", "h5h4", "d5d3"
-            ],
-            'Attacker Loss (Repetition)': [
-                "a4a3", "d5d6", "a3a4", "d6d5", "a4a3", "d5d6", "a3a4", "d6d5", "a4a3", "d5d6", "a3a4", "d6d5"
-            ],
-            'Attacker Win (Encirclement)': [
-                "f1f3", "f5f4", "i4g4", "f4f5", "i6g6", "f5f4", "f9f7",
-                "f4f5", "d9d7", "f5f4", "a6c6", "f4f5", "a4c4", "f5f4", "d1d3"
-            ]
-        }
-
-        for name, sequence in tests.items():
-            print(f"\n{'=' * 10} Testing: {name} {'=' * 10}")
-            self.reset()
-
-            error = False
-            for i, move in enumerate(sequence):
-                try:
-                    action = self.uci_to_action(move)
-                    self.state = self.step_fn(self.state, action)
-                    self.game_state = self.state._x
-                except Exception:
-                    print(f"FAILED at step {i + 1}: Illegal move {move}")
-                    self.print_board()
-                    error = True
-                    break
-
-            if not error:
-                self.print_board()
-                rewards = self.env.game.rewards(self.game_state)
-                term = self.env.game.is_terminal(self.game_state)
-
-                if not term:
-                    print("RESULT: Game Not Finished")
-                elif rewards[0] > 0:
-                    print("RESULT: Attackers Won (+1)")
-                elif rewards[1] > 0:
-                    print("RESULT: Defenders Won (+1)")
-                else:
-                    print("RESULT: Draw (0)")
-
 
 if __name__ == '__main__':
-    game = PlayHnefatafl(ai_color=1)
+    game = PlayHnefatafl(ai_color=-1)
     game.play_ui()

@@ -52,6 +52,7 @@ class Coach:
             self.dirs['pgn'].unlink(missing_ok=True)
 
         # Buffer
+        cpu_device = jax.devices('cpu')[0]
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
         self.buffer = fbx.make_flat_buffer(
             max_length=min_buffer_size * cfg.train.buffer_multiplier,
@@ -59,7 +60,7 @@ class Coach:
             sample_batch_size=cfg.train.batch_size,
             add_batch_size=cfg.train.batch_size
         )
-        cpu_device = jax.devices('cpu')[0]
+
         with jax.default_device(cpu_device):
             example_transition = {
                 "observation": jnp.zeros((9, 9, 43), dtype=jnp.float32),
@@ -68,19 +69,13 @@ class Coach:
                 "legal_action_mask": jnp.zeros((81 * 32,), dtype=jnp.bool_),
                 "player": jnp.zeros((), dtype=jnp.int32)
             }
-            self.buffer_state = self.buffer.init(example_transition)
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
 
         # Model & optimizer
-        self.model: nnx.Module = self._load_model(self.dirs['checkpoints'], cfg.train.load_checkpoint)
-        self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
+        self._init_or_restore(example_transition, cpu_device)
         graph_def, state = nnx.split((self.model, self.optimizer))
         state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
         self.model, self.optimizer = nnx.merge(graph_def, state)
-
-        if hasattr(self, '_restored_buffer_state'):
-            self.buffer_state = self._restored_buffer_state
-            del self._restored_buffer_state
 
         # Environment
         self.env = Hnefatafl()
@@ -98,8 +93,8 @@ class Coach:
         self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
         self.reward_consts = [1, -1, 1, -1, 0.0, 0.0] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
 
-    def _load_optimizer(self, load_checkpoint: bool):
-        total_training_steps = 400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps  # 400 iters
+    def _create_optimizer(self):
+        total_training_steps = 400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps
 
         schedule = optax.warmup_cosine_decay_schedule(
             init_value=1e-4,
@@ -109,7 +104,7 @@ class Coach:
             end_value=1e-5
         )
 
-        optimizer = nnx.Optimizer(
+        return nnx.Optimizer(
             self.model,
             optax.chain(
                 optax.clip_by_global_norm(1.0),
@@ -117,12 +112,6 @@ class Coach:
             ),
             wrt=nnx.Param
         )
-
-        if load_checkpoint and hasattr(self, '_restored_opt_state'):
-            nnx.update(optimizer, self._restored_opt_state)
-            del self._restored_opt_state
-
-        return optimizer
 
     def _get_last_iteration(self):
         """
@@ -135,42 +124,51 @@ class Coach:
         print(dirs)
         return dirs[-1]
 
-    def _load_model(self, model_dir: Path, load_checkpoint: bool) -> HnefataflZeroNet:
-        model = HnefataflZeroNet(
+    def _init_or_restore(self, example_transition, cpu_device):
+        load = self.cfg.train.load_checkpoint
+        ckpt_dir = self.dirs['checkpoints']
+        has_checkpoint = load and ckpt_dir.exists() and any(ckpt_dir.iterdir())
+
+        self.model = HnefataflZeroNet(
             depth=self.cfg.model.depth,
             filter_count=self.cfg.model.filter_count,
             rngs=self.rngs
         )
-        if load_checkpoint and model_dir.exists() and any(model_dir.iterdir()):
-            graph_def, abstract_state = nnx.split(model)
 
-            temp_opt = nnx.Optimizer(
-                model,
-                optax.chain(
-                    optax.clip_by_global_norm(1.0),
-                    optax.adamw(learning_rate=optax.warmup_cosine_decay_schedule(
-                        init_value=1e-4,
-                        peak_value=2e-3,
-                        warmup_steps=500,
-                        decay_steps=400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps,
-                        end_value=1e-5
-                    ))
-                ),
-                wrt=nnx.Param
+        if has_checkpoint:
+            print("Restoring from checkpoint...")
+            graph_def, abstract_model = nnx.split(self.model)
+
+            temp_opt = self._create_optimizer()
+            _, abstract_opt = nnx.split(temp_opt)
+            del temp_opt
+
+            with jax.default_device(cpu_device):
+                full_buffer = self.buffer.init(example_transition)
+                abstract_buffer = jax.tree_util.tree_map(
+                    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+                    full_buffer
+                )
+                del full_buffer
+
+            restored = self.checkpointer.restore(
+                ckpt_dir,
+                {'model': abstract_model, 'optimizer': abstract_opt, 'buffer': abstract_buffer}
             )
-            _, abstract_opt_state = nnx.split(temp_opt)
+            del abstract_model, abstract_opt
 
-            abstract_checkpoint = {
-                'model': abstract_state,
-                'optimizer': abstract_opt_state,
-                'buffer': self.buffer_state
-            }
-            restored = self.checkpointer.restore(model_dir, abstract_checkpoint)
+            self.model = nnx.merge(graph_def, restored['model'])
 
-            model = nnx.merge(graph_def, restored['model'])
-            self._restored_opt_state = restored['optimizer']
+            self.optimizer = self._create_optimizer()
+            nnx.update(self.optimizer, restored['optimizer'])
 
-        return model
+            self.buffer_state = restored['buffer']
+
+            del restored
+        else:
+            self.optimizer = self._create_optimizer()
+            with jax.default_device(cpu_device):
+                self.buffer_state = self.buffer.init(example_transition)
 
     def train(self):
         eval_interval = self.cfg.train.eval_interval
@@ -330,7 +328,9 @@ class Coach:
             'buffer': self.buffer_state
         }
         self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
+        self.checkpointer.wait_until_finished()
         self.checkpointer.save(self.dirs['inference'], {'model': model_state}, force=True)
+        self.checkpointer.wait_until_finished()
         self.evaluator.save_eval_pool()
         self.metrics_tracker.save_metrics()
 

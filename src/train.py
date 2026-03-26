@@ -1,3 +1,4 @@
+import random
 import time
 from pathlib import Path
 
@@ -12,13 +13,12 @@ from flax import nnx
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
-from orbax.checkpoint import args as ocp_args
 
 from src.evaluation import Evaluator
 from src.hnefatafl.hnefatafl import Hnefatafl
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
-from src.self_play import self_play, set_pbar
+from src.self_play import self_play, self_play_vs_opponent, set_pbar
 from src.utils import dir_safe, add_to_buffer_cpu, train_step
 
 
@@ -80,12 +80,20 @@ class Coach:
 
         # Environment
         self.env = Hnefatafl()
+
+        self.opp_ratio = cfg.train.get('opponent_ratio', 0.25)
+        self.opp_batch = int(cfg.train.batch_size * self.opp_ratio)
+        self.self_batch = cfg.train.batch_size - self.opp_batch
+
         key_env = jax.random.PRNGKey(cfg.train.seed + 1)
-        self.env_state = jax.jit(jax.vmap(self.env.init))(
-            jax.random.split(key_env, cfg.train.batch_size)
+        key_self, key_opp = jax.random.split(key_env)
+
+        # Persistent env state for self-play portion
+        self.env_state_self = jax.jit(jax.vmap(self.env.init))(
+            jax.random.split(key_self, self.self_batch)
         )
-        self.env_state = jax.tree_util.tree_map(
-            lambda x: jax.device_put(x, self.data_sharding), self.env_state
+        self.env_state_self = jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, self.data_sharding), self.env_state_self
         )
 
         # Setup
@@ -155,7 +163,7 @@ class Coach:
 
             restored = self.checkpointer.restore(
                 ckpt_dir,
-                target=ocp_args.StandardRestore(item=abstract_checkpoint)
+                target=abstract_checkpoint
             )
             del abstract_model, abstract_opt
 
@@ -180,7 +188,7 @@ class Coach:
             iteration = i + self.last_iteration + 1
             print(f"--- Iteration {iteration} ---")
 
-            self._run_self_play_loop()
+            self._run_self_play_loop(iteration)
             self._run_training_loop()
 
             self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
@@ -204,36 +212,104 @@ class Coach:
 
         self._save_progress()
 
-    def _run_self_play_loop(self):
+    def _load_random_sp_opponent(self):
+        """Load a random opponent from the eval pool for mixed self-play."""
+        pool = self.evaluator.eval_pool
+        if not pool:
+            return None, None
+
+        name = random.choice(list(pool.keys()))
+        graph_def, _ = nnx.split(self.model)
+        gpu_state = jax.device_put(pool[name])
+        opponent = nnx.merge(graph_def, gpu_state)
+        opponent.eval()
+        return opponent, name
+
+    def _init_opponent_env(self, player_order):
+        """Create a fresh opponent env state with forced player_order."""
+        key = self.rngs.split()
+        env_state_opp = jax.jit(jax.vmap(self.env.init))(
+            jax.random.split(key, self.opp_batch)
+        )
+        forced_order = jnp.broadcast_to(player_order[None, :], (self.opp_batch, 2))
+        env_state_opp = env_state_opp.replace(
+            _player_order=forced_order,
+            current_player=jnp.full(self.opp_batch, player_order[0], dtype=jnp.int32)
+        )
+        env_state_opp = jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, self.data_sharding), env_state_opp
+        )
+        return env_state_opp
+
+    def _run_self_play_loop(self, iteration: int):
         self.model.eval()
 
         steps = self.cfg.train.self_play_steps
-        print(f"Generating data ({steps} steps x {self.cfg.train.batch_size} games)...")
+        opponent, opponent_name = self._load_random_sp_opponent()
 
-        rng_key = self.rngs.split()
+        print(f"Generating data ({steps} steps x {self.self_batch}+{self.opp_batch} games, opponent: {opponent_name})...")
 
-        pbar = tqdm(total=steps, desc="Self-Play", mininterval=self.cfg.train.tqdm_interval,
-                               ncols=100, unit='steps')
+        # Alternate which side the current model plays against the opponent
+        player_order = jnp.array([0, 1]) if iteration % 2 == 0 else jnp.array([1, 0])
+        role_str = "attacker" if iteration % 2 == 0 else "defender"
+        print(f"    Opponent batch: current model as {role_str}")
+
+        rng_key_self = self.rngs.split()
+        rng_key_opp = self.rngs.split()
+
+        pbar = tqdm(total=steps * 2, desc="Self-Play", mininterval=self.cfg.train.tqdm_interval,
+                    ncols=100, unit='steps')
         set_pbar(pbar)
 
-        (self.env_state, final_transitions, terminals, rewards,
-         step_counts, entropies, pieces_left, half_move_draws) = self_play(
+        reward_consts = jnp.array(self.reward_consts, dtype=jnp.float32)
+
+        (self.env_state_self, self_transitions, self_terminals, self_rewards,
+         self_step_counts, self_entropies, self_pieces_left, self_hm_draws) = self_play(
             model=self.model,
-            env_state=self.env_state,
-            rng_key=rng_key,
-            num_steps = self.cfg.train.self_play_steps,
+            env_state=self.env_state_self,
+            rng_key=rng_key_self,
+            num_steps=steps,
             num_simulations=self.cfg.mcts.simulations,
             env=self.env,
-            batch_size=self.cfg.train.batch_size,
-            reward_consts=jnp.array(self.reward_consts, dtype=jnp.float32)
+            batch_size=self.self_batch,
+            reward_consts=reward_consts
+        )
+
+        env_state_opp = self._init_opponent_env(player_order)
+
+        (_, opp_transitions, opp_terminals, opp_rewards,
+         opp_step_counts, opp_entropies, opp_pieces_left, opp_hm_draws) = self_play_vs_opponent(
+            model=self.model,
+            opponent=opponent,
+            env_state=env_state_opp,
+            rng_key=rng_key_opp,
+            num_steps=steps,
+            num_simulations=self.cfg.mcts.simulations,
+            env=self.env,
+            batch_size=self.opp_batch,
+            reward_consts=reward_consts,
+            player_order=player_order
         )
 
         pbar.close()
         set_pbar(None)
 
-        self._process_results(terminals, rewards, step_counts, entropies, pieces_left, half_move_draws)
-        final_transitions_cpu = jax.device_get(final_transitions)
-        self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions_cpu, self.buffer)
+        all_transitions = jax.tree_util.tree_map(
+            lambda a, b: jnp.concatenate([a, b], axis=1),
+            self_transitions, opp_transitions
+        )
+        all_terminals = jnp.concatenate([self_terminals, opp_terminals], axis=1)
+        all_rewards = jnp.concatenate([self_rewards, opp_rewards], axis=1)
+        all_step_counts = jnp.concatenate([self_step_counts, opp_step_counts], axis=1)
+        all_entropies = jnp.concatenate([self_entropies, opp_entropies], axis=1)
+        all_pieces_left = jnp.concatenate([self_pieces_left, opp_pieces_left], axis=1)
+        all_hm_draws = jnp.concatenate([self_hm_draws, opp_hm_draws], axis=1)
+
+        self._process_results(all_terminals, all_rewards, all_step_counts,
+                              all_entropies, all_pieces_left, all_hm_draws)
+
+        all_transitions_cpu = jax.device_get(all_transitions)
+        self.buffer_state = add_to_buffer_cpu(self.buffer_state, all_transitions_cpu, self.buffer)
 
     def _process_results(self, terminals, rewards, step_counts, entropies, pieces_left, half_move_draws):
         terminals = jax.device_get(terminals)

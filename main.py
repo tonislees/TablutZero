@@ -25,7 +25,7 @@ def main(cfg: DictConfig):
     #mt.plot_avg_pieces()
     #mt.plot_elo_comparison()
 
-    game = PlayTablut(mcts_sims=300)
+    game = PlayTablut(mcts_sims=150)
     game.play_ui()
 
 if __name__ == '__main__':

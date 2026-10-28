@@ -4,11 +4,13 @@ models/
 BayesElo/
 game_results.pgn
 .idea/
+.antigravitycli
 commands.txt
 config.yaml
 train.sh
 /training_data
 GEMINI.md
+*/AGENTS.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

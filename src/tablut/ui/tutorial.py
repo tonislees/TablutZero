@@ -52,9 +52,16 @@ def get_tutorial_steps():
         {
             "title": "Hostile Square Capture",
             "msg": "Hostile squares (corners and the throne) also act as your pieces to help pin and capture enemies.",
-            "state": (mock_state({1: -1, 11: 1, 62: 1, 5: 1, 36: -1, 44: -1}), (11, 2)),
+            "state": (mock_state({11: 1, 62: 1, 5: 1, 36: -1, 44: -1, 1: -1}), (11, 2)),
             "animate_move": (11, 2),
             "captures": [1],
+            "popup_pos": (2, 5.5)
+        },
+        {
+            "title": "Safe Sandwiches",
+            "msg": "Moving your own piece between two enemy pieces is completely safe. A piece is only captured when an opponent moves to sandwich it.",
+            "state": (mock_state({18: -1, 36: -1, 28: 1}, color=1), (28, 27)),
+            "animate_move": (28, 27),
             "popup_pos": (2, 5.5)
         },
         {
@@ -90,6 +97,13 @@ def get_tutorial_steps():
             "animate_move_seq": [(40, 49), (3, 12), (49, 40), (12, 3), (40, 49), (3, 12), (49, 40)], # Alternating King and Attacker moves
             "show_win": "ATTACKERS WIN!", # If defender (king) repeats, he loses
             "popup_pos": (2, 6.5)
+        },
+        {
+            "title": "No Moves Left",
+            "msg": "If a player has no legal moves remaining on their turn, they immediately lose the game.",
+            "state": (mock_state({18: 2, 9: -1, 19: -1, 27: -1}, color=1), None),
+            "show_win": "ATTACKERS WIN!",
+            "popup_pos": (2, 5.5)
         }
     ]
     return steps
